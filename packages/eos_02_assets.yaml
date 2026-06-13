@@ -1,0 +1,150 @@
+# ============================================================
+# EnergyOS — Laag 2 — ASSETS
+# ============================================================
+# Capabilities per asset: "wat KAN dit asset nu doen?"
+# Lagen 3+ vragen alleen capabilities op, ze kennen geen
+# device-specifieke knoppen. Dit maakt asset-swap mogelijk
+# (Marstek → Tesla Powerwall) zonder elders te wijzigen.
+# ============================================================
+
+template:
+  - sensor:
+      # ─── BATTERIJ capabilities ────────────────────────────
+      - name: "eos_asset_battery_can_charge_w"
+        unique_id: eos_asset_battery_can_charge_w
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {# Per-batterij laadcapaciteit — zelfde charging_limiter als strategies.yaml:
+             temp < 5°C → 0W, temp < 10°C → max 500W
+             SoC >= 99% → 0W, SoC >= 95% → max 1500W, anders 2500W per eenheid #}
+          {% set s1 = states('sensor.marstek_3x_m1_battery_state_of_charge') | float(-1) %}
+          {% set s2 = states('sensor.marstek_3x_m2_battery_state_of_charge') | float(-1) %}
+          {% set s3 = states('sensor.marstek_3x_m3_battery_state_of_charge') | float(-1) %}
+          {% set t1 = states('sensor.marstek_3x_m1_min_cell_temperature') | float(25) %}
+          {% set t2 = states('sensor.marstek_3x_m2_min_cell_temperature') | float(25) %}
+          {% set t3 = states('sensor.marstek_3x_m3_min_cell_temperature') | float(25) %}
+          {% set c1 = 0 if s1 < 0 else (0 if t1 < 5 else (500 if t1 < 10 else (0 if s1 >= 99 else (1500 if s1 >= 95 else 2500)))) %}
+          {% set c2 = 0 if s2 < 0 else (0 if t2 < 5 else (500 if t2 < 10 else (0 if s2 >= 99 else (1500 if s2 >= 95 else 2500)))) %}
+          {% set c3 = 0 if s3 < 0 else (0 if t3 < 5 else (500 if t3 < 10 else (0 if s3 >= 99 else (1500 if s3 >= 95 else 2500)))) %}
+          {{ c1 + c2 + c3 }}
+        icon: mdi:battery-arrow-up
+
+      - name: "eos_asset_battery_can_discharge_w"
+        unique_id: eos_asset_battery_can_discharge_w
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {# Per-batterij ontlaadcapaciteit — batterij onder min-SoC telt niet mee #}
+          {% set soc_min = states('input_number.eos_min_soc_for_eve_discharge') | float(20) %}
+          {% set s1 = states('sensor.marstek_3x_m1_battery_state_of_charge') | float(-1) %}
+          {% set s2 = states('sensor.marstek_3x_m2_battery_state_of_charge') | float(-1) %}
+          {% set s3 = states('sensor.marstek_3x_m3_battery_state_of_charge') | float(-1) %}
+          {% set d1 = 0 if (s1 < 0 or s1 <= soc_min) else 2500 %}
+          {% set d2 = 0 if (s2 < 0 or s2 <= soc_min) else 2500 %}
+          {% set d3 = 0 if (s3 < 0 or s3 <= soc_min) else 2500 %}
+          {{ d1 + d2 + d3 }}
+        icon: mdi:battery-arrow-down
+
+      - name: "eos_asset_battery_energy_to_full_kwh"
+        unique_id: eos_asset_battery_energy_to_full_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: measurement
+        state: >
+          {% set mx = states('sensor.eos_battery_energy_max_kwh') | float(0) %}
+          {% set av = states('sensor.eos_battery_energy_available_kwh') | float(0) %}
+          {{ [mx - av, 0] | max | round(2) }}
+
+      - name: "eos_asset_battery_energy_to_min_kwh"
+        unique_id: eos_asset_battery_energy_to_min_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: measurement
+        state: >
+          {% set av = states('sensor.eos_battery_energy_available_kwh') | float(0) %}
+          {% set mx = states('sensor.eos_battery_energy_max_kwh') | float(0) %}
+          {% set soc_min = states('input_number.eos_min_soc_for_eve_discharge') | float(20) %}
+          {% set reserve = mx * (soc_min / 100) %}
+          {{ [av - reserve, 0] | max | round(2) }}
+
+      # ─── WARMTEPOMP capabilities ──────────────────────────
+      - name: "eos_asset_hp_can_throttle"
+        unique_id: eos_asset_hp_can_throttle
+        state: >
+          {% set p = states('sensor.eos_hp_power_w') | float(0) %}
+          {{ 'ja' if p > 200 else 'idle' }}
+
+      - name: "eos_asset_hp_running"
+        unique_id: eos_asset_hp_running
+        state: "{{ states('sensor.eos_hp_power_w') | float(0) > 150 }}"
+
+      - name: "eos_asset_hp_can_defer_min"
+        unique_id: eos_asset_hp_can_defer_min
+        unit_of_measurement: "min"
+        state_class: measurement
+        state: >
+          {# Hoeveel minuten kan HP uitgesteld worden zonder comfort te verliezen?
+             Schatting o.b.v. buitentemp: koud = kort uitstellen, mild = lang #}
+          {% set tout = states('sensor.eos_outside_temp_c') | float(15) %}
+          {% if tout < -5 %}10
+          {% elif tout < 0 %}20
+          {% elif tout < 5 %}40
+          {% elif tout < 10 %}90
+          {% else %}240{% endif %}
+        icon: mdi:timer-pause-outline
+
+      - name: "eos_asset_hp_cop_estimate"
+        unique_id: eos_asset_hp_cop_estimate
+        state_class: measurement
+        state: >
+          {% set t_out = states('sensor.eos_outside_temp_c') | float(7) %}
+          {% set t_sup = states('sensor.eos_hp_supply_temp_c') | float(35) %}
+          {# Simpele Carnot-derived heuristiek; vervang door perf-map indien beschikbaar #}
+          {% set dt = (t_sup + 273.15) - (t_out + 273.15) %}
+          {% if dt > 5 %}{{ (0.45 * (t_sup + 273.15) / dt) | round(2) }}
+          {% else %}5.0{% endif %}
+        icon: mdi:chart-line
+
+      # ─── DHW capabilities ─────────────────────────────────
+      - name: "eos_asset_dhw_temp_c"
+        unique_id: eos_asset_dhw_temp_c
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state: "{{ states('sensor.eos_dhw_top_c') | float(0) | round(1) }}"
+
+      - name: "eos_asset_dhw_can_defer_hr"
+        unique_id: eos_asset_dhw_can_defer_hr
+        unit_of_measurement: "h"
+        state_class: measurement
+        state: >
+          {% set t = states('sensor.eos_dhw_top_c') | float(50) %}
+          {# Heuristiek: per graad boven 45°C kun je ongeveer 2u uitstellen #}
+          {{ [[((t - 45) * 2), 0] | max, 24] | min | round(0) }}
+        icon: mdi:water-thermometer
+
+      - name: "eos_asset_dhw_needs_heating"
+        unique_id: eos_asset_dhw_needs_heating
+        state: >
+          {% set t = states('sensor.eos_dhw_top_c') | float(50) %}
+          {{ 'urgent' if t < 45 else ('soon' if t < 50 else 'nee') }}
+
+  - binary_sensor:
+      - name: "eos_asset_battery_full"
+        unique_id: eos_asset_battery_full
+        state: "{{ states('sensor.eos_battery_soc_estimate_pct') | float(0) >= 95 }}"
+        icon: mdi:battery-high
+
+      - name: "eos_asset_battery_low"
+        unique_id: eos_asset_battery_low
+        state: >
+          {{ states('sensor.eos_battery_soc_estimate_pct') | float(0) <=
+             states('input_number.eos_min_soc_for_eve_discharge') | float(20) }}
+        icon: mdi:battery-low
+
+      - name: "eos_asset_dhw_legionella_risk"
+        unique_id: eos_asset_dhw_legionella_risk
+        state: "{{ states('sensor.eos_dhw_top_c') | float(50) < 50 }}"
+        device_class: problem

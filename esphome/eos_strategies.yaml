@@ -1,0 +1,753 @@
+# ============================================================
+# EnergyOS — Strategy Library
+# Node-RED marstek-venus-rs485 v4.10.1 compatible — 1:1 port
+# ============================================================
+# Strategie      Mode-naam           Gedrag
+# ─────────────────────────────────────────────────────────────
+# FULL_STOP      "Full stop"         Alle batterijen stop
+# CHARGE_PV      "Charge PV"         PI → 0W, discharge geblokkeerd (zonnestroom)
+# SELF_CONS      "Self-consumption"  PI → 0W bidirectioneel
+# CHARGE         "Charge"            Max laden tot SoC-doel (charging_limiter ≥ 95%)
+# SELL           "Sell"              Constant ontladen tot SoC-vloer (geen PI)
+# DYNAMIC        "Dynamic"           Tarief: goedkoop→Charge, duur→SC, normaal→ChargePV
+# DYNAMIC_2      "Dynamic 2"         Idem (pair-matching uren via HA/Zonneplan)
+# PEAK_SHAVE     "Peak shave"        Import clampen op hard_limit — ook AUTOMATISCH overlay
+# TIMED          "Timed"             Delegeer (Node-RED leidend)
+# MANUAL         "Handmatig"         Delegeer (Node-RED leidend)
+#
+# Peak shaving is automatisch actief als modus ≠ Handmatig/Timed
+# én grid > hard_limit, met 10s release timer (PEAK_SHAVING_TIMEOUT_SEC=10).
+#
+# Charging limiter (Node-RED battery life optimizer):
+#   SoC ≥ 99% → max 1000W laden
+#   SoC ≥ 95% → max 1500W laden
+#
+# PI defaults (Node-RED: Kp=0.75, Ki=0 → P-only regelaar):
+#   Steady-state offset acceptabel; autotune bepaalt Ki indien gewenst.
+# ============================================================
+
+substitutions:
+  eos_str_loop_s: "1"
+  eos_str_soc_safety_floor: "15"        # absolute stop ontladen (%)
+  eos_str_soc_safety_ceiling: "99"      # absolute stop laden (%)
+  eos_str_sc_target_w: "0"             # PI setpoint — Node-RED: 0W (NOM)
+  eos_str_sc_deadband_w: "150"         # ±150W doodzone
+  eos_str_grid_ema_alpha: "0.2"        # P1 EMA-filter (0.1 = traag, 0.5 = snel)
+  eos_str_slew_rate_w: "200"           # max vermogenswijziging W/s
+  eos_str_peak_shave_timeout_s: "10"   # Node-RED: PEAK_SHAVING_TIMEOUT_SEC
+  # ─── PI controller ──────────────────────────────────────────
+  eos_str_pid_kp_default: "0.75"       # Node-RED Kp default
+  eos_str_pid_ki_default: "0.0"        # Node-RED Ki default (P-only)
+  # ─── Autotune (relay-methode Ziegler-Nichols) ───────────────
+  eos_str_at_relay_amp: "2000"         # relay amplitude totaal (W)
+  eos_str_at_osc_target: "5"           # oscillaties voor geldige meting
+  # ─── Batterijtemperatuur beveiliging ────────────────────────
+  eos_str_temp_stop_c: "5"             # °C: onder deze temp → laden verboden
+  eos_str_temp_trickle_c: "10"         # °C: onder deze temp → max trickle-laden
+  eos_str_temp_trickle_max_w: "500"    # W: max laadvermogen tijdens trickle
+
+# ─── State globals ─────────────────────────────────────────
+globals:
+  - id: eos_str_active_strategy_code
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: eos_str_active_sub_code      # voor PI integraal-reset tracking
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: eos_str_target_total_w
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: eos_str_grid_ema_w
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+
+  - id: eos_str_prev_target_w
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: eos_str_peak_shave_last_ms   # millis() van laatste PS-overtreding
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  # ─── PI state ───────────────────────────────────────────────
+  - id: eos_str_pid_integral
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+
+  # ─── Autotune state ─────────────────────────────────────────
+  - id: eos_str_at_osc_count
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: eos_str_at_period_sum_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  - id: eos_str_at_amplitude_sum
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+
+  - id: eos_str_at_peak_amplitude
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+
+  - id: eos_str_at_last_cross_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  - id: eos_str_at_prev_above
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+# ─── Controls ──────────────────────────────────────────────
+switch:
+  - platform: template
+    name: "EOS Strategies Active"
+    id: eos_str_active_switch
+    icon: mdi:strategy
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    entity_category: config
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 40
+
+  - platform: template
+    name: "EOS Strategy Verbose Log"
+    id: eos_str_verbose
+    icon: mdi:text-long
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    entity_category: config
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 41
+
+  - platform: template
+    name: "EOS PID Autotune"
+    id: eos_str_autotune_sw
+    icon: mdi:auto-fix
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - lambda: |-
+          id(eos_str_at_osc_count)      = 0;
+          id(eos_str_at_period_sum_ms)  = 0;
+          id(eos_str_at_amplitude_sum)  = 0.0f;
+          id(eos_str_at_peak_amplitude) = 0.0f;
+          id(eos_str_at_last_cross_ms)  = 0;
+          id(eos_str_at_prev_above)     = id(eos_str_grid_ema_w) > ${eos_str_sc_target_w};
+          id(eos_str_pid_integral)      = 0.0f;
+          id(eos_str_autotune_status).publish_state("Gestart — wacht op eerste oscillatie...");
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 42
+
+number:
+  - platform: template
+    name: "EOS PID Kp"
+    id: eos_str_pid_kp_num
+    min_value: 0.1
+    max_value: 10.0
+    step: 0.05
+    initial_value: ${eos_str_pid_kp_default}
+    optimistic: true
+    restore_value: true
+    mode: box
+    unit_of_measurement: "W/W"
+    icon: mdi:tune
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 43
+
+  - platform: template
+    name: "EOS PID Ki"
+    id: eos_str_pid_ki_num
+    min_value: 0.0
+    max_value: 2.0
+    step: 0.01
+    initial_value: ${eos_str_pid_ki_default}
+    optimistic: true
+    restore_value: true
+    mode: box
+    icon: mdi:tune-variant
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 44
+
+# ─── Status ────────────────────────────────────────────────
+text_sensor:
+  - platform: template
+    name: "EOS Strategy Active"
+    id: eos_str_active_text
+    icon: mdi:strategy
+    update_interval: never
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 60
+
+  - platform: template
+    name: "EOS Strategy Decision"
+    id: eos_str_decision_text
+    icon: mdi:lightbulb-question
+    update_interval: never
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 61
+
+  - platform: template
+    name: "EOS Strategy Shadow Log"
+    id: eos_str_shadow_log
+    icon: mdi:eye-outline
+    update_interval: never
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 62
+
+  - platform: template
+    name: "EOS Autotune Status"
+    id: eos_str_autotune_status
+    icon: mdi:chart-bell-curve
+    update_interval: never
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 63
+
+sensor:
+  - platform: homeassistant
+    id: eos_ha_charge_target_soc
+    entity_id: input_number.eos_charge_target_soc
+
+  - platform: template
+    name: "EOS Strategy Target"
+    id: eos_str_target_sensor
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    update_interval: ${eos_str_loop_s}s
+    lambda: 'return (float) id(eos_str_target_total_w);'
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 64
+
+# ─── HOOFDLOOP ─────────────────────────────────────────────
+interval:
+  - interval: ${eos_str_loop_s}s
+    startup_delay: 60s
+    then:
+      - lambda: |-
+          // ──────────────────────────────────────────────────────
+          // HELPERS
+          // ──────────────────────────────────────────────────────
+          auto val_or = [](esphome::sensor::Sensor* s, float def) -> float {
+            return (s != nullptr && s->has_state() && !isnan(s->state)) ? s->state : def;
+          };
+          auto num_or = [](esphome::number::Number* n, float def) -> float {
+            return (n != nullptr && n->has_state() && !isnan(n->state)) ? n->state : def;
+          };
+          // Charging limiter: batterijtemperatuur + SoC taper (Node-RED battery life optimizer)
+          auto charging_limiter = [](float pw, float soc, float temp) -> float {
+            if (temp < (float)${eos_str_temp_stop_c})    return 0.0f;
+            if (temp < (float)${eos_str_temp_trickle_c}) return std::min(pw, (float)${eos_str_temp_trickle_max_w});
+            if (soc >= 99.0f) return std::min(pw, 1000.0f);
+            if (soc >= 95.0f) return std::min(pw, 1500.0f);
+            return pw;
+          };
+
+          // ──────────────────────────────────────────────────────
+          // INPUTS
+          // ──────────────────────────────────────────────────────
+          std::string mode = "Handmatig";
+          if (id(eos_ha_mode) != nullptr && id(eos_ha_mode)->has_state())
+            mode = id(eos_ha_mode)->state;
+
+          // P1 direct prefereert boven HA (1s latency vs. 5-30s)
+          const bool p1_ok = id(eos_p1_direct_connected);
+          const bool ha_ok = id(eos_ha_alive);
+          // Beide databronnen dood → we weten niet wat het net doet; veilig stoppen
+          const bool grid_data_unavailable = !p1_ok && !ha_ok;
+
+          const float grid_raw = p1_ok
+                                 ? id(eos_p1_direct_w)
+                                 : val_or(id(eos_ha_grid_power_w), 0.0f);
+          // EMA filter — dempt P1 ruis
+          const float alpha = (float)${eos_str_grid_ema_alpha};
+          id(eos_str_grid_ema_w) = alpha * grid_raw + (1.0f - alpha) * id(eos_str_grid_ema_w);
+          const float grid_w = id(eos_str_grid_ema_w);
+
+          const float tariff   = val_or(id(eos_ha_tariff_eur_kwh),  0.20f);
+          const float cheap    = val_or(id(eos_ha_tariff_cheap),    0.10f);
+          const float expensv  = val_or(id(eos_ha_tariff_expensive),0.28f);
+          const float hard_lim = val_or(id(eos_ha_grid_hard_limit_w), 5500.0f);
+          const float soc_min  = val_or(id(eos_ha_min_soc), (float)${eos_str_soc_safety_floor});
+          const float charge_target_soc = val_or(id(eos_ha_charge_target_soc), 100.0f);
+
+          // Marstek state — direct van Modbus
+          const float soc1 = val_or(id(m1_battery_state_of_charge), 50.0f);
+          const float soc2 = val_or(id(m2_battery_state_of_charge), 50.0f);
+          const float soc3 = val_or(id(m3_battery_state_of_charge), 50.0f);
+          const float soc_avg = (soc1 + soc2 + soc3) / 3.0f;
+
+          // Per-batterij min-celtemperatuur — default 25°C (veilig) als sensor unavailable
+          const float temp1 = val_or(id(m1_min_cell_temperature), 25.0f);
+          const float temp2 = val_or(id(m2_min_cell_temperature), 25.0f);
+          const float temp3 = val_or(id(m3_min_cell_temperature), 25.0f);
+          const float temp_min = std::min({temp1, temp2, temp3});
+
+          const float max_chg1 = num_or(id(m1_max_charge_power),    2500.0f);
+          const float max_chg2 = num_or(id(m2_max_charge_power),    2500.0f);
+          const float max_chg3 = num_or(id(m3_max_charge_power),    2500.0f);
+          // Effectieve laadcapaciteit per batterij — temp + SoC limiet
+          const float total_max_charge_raw = charging_limiter(max_chg1, soc1, temp1)
+                                           + charging_limiter(max_chg2, soc2, temp2)
+                                           + charging_limiter(max_chg3, soc3, temp3);
+
+          // EV beveiliging: als auto aan de lader staat, blokkeer batterijladen
+          // (3x25A zekeringen kunnen anders overbelast raken: EV ~11kW + bat ~7.5kW + huis ~1kW)
+          // Default-safe: als sensor unavailable → ev_charging = false (laden toegestaan)
+          const bool ev_charging = (id(eos_ha_ev_charging) != nullptr)
+                                   && id(eos_ha_ev_charging)->has_state()
+                                   && id(eos_ha_ev_charging)->state;
+          // Default-safe: als protection toggle unavailable → bescherming AAN
+          const bool ev_prot_en  = (id(eos_ha_ev_protection_enabled) == nullptr)
+                                   || !id(eos_ha_ev_protection_enabled)->has_state()
+                                   || id(eos_ha_ev_protection_enabled)->state;
+          const float total_max_charge = (ev_charging && ev_prot_en) ? 0.0f : total_max_charge_raw;
+
+          const float max_dis1 = num_or(id(m1_max_discharge_power), 2500.0f);
+          const float max_dis2 = num_or(id(m2_max_discharge_power), 2500.0f);
+          const float max_dis3 = num_or(id(m3_max_discharge_power), 2500.0f);
+          // Effectieve ontlaadcapaciteit — lege batterij (SoC ≤ soc_min) telt niet mee
+          const float total_max_discharge = ((soc1 > soc_min) ? max_dis1 : 0.0f)
+                                          + ((soc2 > soc_min) ? max_dis2 : 0.0f)
+                                          + ((soc3 > soc_min) ? max_dis3 : 0.0f);
+
+          const bool soc_too_low  = (soc_avg <= (float)${eos_str_soc_safety_floor});
+          const bool soc_too_high = (soc_avg >= (float)${eos_str_soc_safety_ceiling});
+
+          // ──────────────────────────────────────────────────────
+          // OUTPUT VARS
+          // ──────────────────────────────────────────────────────
+          int strategy_code = 0;
+          int target_total_w = 0;
+          const char* drv_command = "idle";
+          char reason_buf[160]; reason_buf[0] = '\0';
+          char shadow_buf[200]; shadow_buf[0] = '\0';
+
+          // ──────────────────────────────────────────────────────
+          // DATA LOSS FAILSAFE
+          // P1 én HA beide onbereikbaar → we kunnen grid niet meten.
+          // De PI controller zou dan op 0W gaan sturen en onnodig
+          // ontladen. Veiliger is direct stoppen.
+          // ──────────────────────────────────────────────────────
+          if (grid_data_unavailable) {
+            id(eos_str_active_strategy_code) = 1;
+            id(eos_str_target_total_w)       = 0;
+            id(eos_str_active_text).publish_state("failsafe_data_loss");
+            id(eos_str_decision_text).publish_state(
+                "FAILSAFE: P1 + HA beide onbereikbaar → Full stop");
+            if (id(eos_str_active_switch).state) {
+              auto cmd_sel = id(eos_drv_command);
+              if (cmd_sel != nullptr) {
+                auto c = cmd_sel->make_call(); c.set_option("stop"); c.perform();
+              }
+            }
+            return;
+          }
+
+          // ──────────────────────────────────────────────────────
+          // PEAK SHAVING OVERLAY
+          // Node-RED: automatisch overlay bij grid > import_limit
+          // Release: 10s na laatste overtreding (PEAK_SHAVING_TIMEOUT_SEC=10)
+          // Standaard uit in Handmatig/Timed; opt-in via eos_ha_peak_shave_in_manual
+          // ──────────────────────────────────────────────────────
+          const bool ps_in_manual = (id(eos_ha_peak_shave_in_manual) != nullptr)
+                                    && id(eos_ha_peak_shave_in_manual)->state;
+          bool ps_override = false;
+          if ((mode != "Handmatig" && mode != "Timed") || ps_in_manual) {
+            if (grid_w > hard_lim) {
+              id(eos_str_peak_shave_last_ms) = millis();
+            }
+            const uint32_t ps_timeout_ms = (uint32_t)(${eos_str_peak_shave_timeout_s}) * 1000UL;
+            const uint32_t now_ps = millis();
+            const uint32_t ps_age = (id(eos_str_peak_shave_last_ms) > 0
+                                     && now_ps >= id(eos_str_peak_shave_last_ms))
+                ? (now_ps - id(eos_str_peak_shave_last_ms)) : UINT32_MAX;
+            ps_override = (ps_age < ps_timeout_ms);
+          }
+
+          // ──────────────────────────────────────────────────────
+          // DYNAMIC: resolve effectieve sub-mode op basis van tarief
+          // goedkoop  → Charge (max laden uit grid)
+          // duur      → Self-consumption (SC PI bidirectioneel)
+          // normaal   → Charge PV (SC PI, discharge geblokkeerd)
+          // ──────────────────────────────────────────────────────
+          // 7B: configureerbaar gedrag bij duur tarief
+          const bool dynamic_sell = (id(eos_ha_dynamic_sell_on_expensive) != nullptr)
+                                    && id(eos_ha_dynamic_sell_on_expensive)->state;
+
+          std::string eff = mode;
+          if (mode == "Dynamic") {
+            // Gebruik eos_ha_tariff_level: bevat auto-threshold logica uit HA
+            // (goedkoop/duur grens kan dynamisch zijn → niet opnieuw berekenen in ESP)
+            std::string tlevel = "normaal";
+            if (id(eos_ha_tariff_level) != nullptr && id(eos_ha_tariff_level)->has_state())
+              tlevel = id(eos_ha_tariff_level)->state;
+            if      (tlevel == "goedkoop") eff = "_charge_grid";
+            else if (tlevel == "duur")     eff = dynamic_sell ? "_dynamic_sell" : "Self-consumption";
+            else                           eff = "Charge PV";
+          } else if (mode == "Dynamic 2") {
+            // Pair-matching: HA sensor bepaalt of dit uur goedkoop/duur/normaal is
+            std::string d2 = "normaal";
+            if (id(eos_ha_dynamic2_level) != nullptr && id(eos_ha_dynamic2_level)->has_state())
+              d2 = id(eos_ha_dynamic2_level)->state;
+            if      (d2 == "goedkoop") eff = "_charge_grid";
+            else if (d2 == "duur")     eff = dynamic_sell ? "_dynamic_sell" : "Self-consumption";
+            else                       eff = "Charge PV";
+          }
+
+          // PI sub-code voor integraal-reset detectie
+          // 2 = charge_pv, 3 = sc, anders 0
+          const int pi_sub = (eff == "Self-consumption") ? 3
+                           : (eff == "Charge PV")        ? 2 : 0;
+          const int prev_sub = id(eos_str_active_sub_code);
+          if (prev_sub != pi_sub && pi_sub != 0) {
+            id(eos_str_pid_integral) = 0.0f;
+          }
+
+          // ──────────────────────────────────────────────────────
+          // STRATEGIE-SELECTIE
+          // ──────────────────────────────────────────────────────
+          int sub_code = 0;
+
+          if (ps_override || mode == "Peak shave") {
+            // ── PEAK SHAVING ──────────────────────────────────
+            // Discharge om import te begrenzen op hard_limit
+            strategy_code = 7; sub_code = 7;
+            if (grid_w > hard_lim && !soc_too_low && soc_avg > soc_min) {
+              int excess = (int)(grid_w - hard_lim);
+              target_total_w = (int)std::min((float)excess, total_max_discharge);
+              drv_command = "discharge";
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "[PS] grid %dW > limit %dW → discharge %dW",
+                       (int)grid_w, (int)hard_lim, target_total_w);
+            } else {
+              drv_command = "stop"; target_total_w = 0;
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "[PS] wacht — grid %dW, SoC %.0f%%", (int)grid_w, soc_avg);
+            }
+
+          } else if (mode == "Full stop") {
+            // ── FULL STOP ─────────────────────────────────────
+            strategy_code = 1; sub_code = 1;
+            drv_command = "stop"; target_total_w = 0;
+            snprintf(reason_buf, sizeof(reason_buf), "Full stop — alle batterijen stop");
+
+          } else if (mode == "Sell") {
+            // ── SELL ──────────────────────────────────────────
+            // Constant max discharge. Stopt bij SoC-vloer.
+            // 7A: ook stoppen bij negatief tarief (betalen om te exporteren = verlies)
+            strategy_code = 5; sub_code = 5;
+            if (soc_too_low || soc_avg <= soc_min) {
+              drv_command = "stop"; target_total_w = 0;
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "Sell — SoC %.0f%% ≤ vloer %.0f%%, stop", soc_avg, soc_min);
+            } else if (tariff <= 0.0f) {
+              drv_command = "stop"; target_total_w = 0;
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "Sell — tarief %.4f€ ≤ 0, verkoop geblokkeerd", tariff);
+            } else {
+              target_total_w = (int)total_max_discharge;
+              drv_command = "discharge";
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "Sell %.3f€ — discharge %dW (SoC %.0f%%)",
+                       tariff, target_total_w, soc_avg);
+            }
+
+          } else if (eff == "_dynamic_sell") {
+            // ── DYNAMIC SELL ──────────────────────────────────
+            // 7B: duur uur + eos_dynamic_sell_on_expensive = AAN
+            // Max ontladen als Sell, maar strategy_code 6 (Dynamic sub-mode).
+            // Geen goal_reached interactie — HA Sell-automatie kijkt alleen naar
+            // input_select.energy_os_mode == "Sell", niet naar Dynamic.
+            strategy_code = 6; sub_code = 5;
+            id(eos_str_pid_integral) = 0.0f;
+            if (soc_too_low || soc_avg <= soc_min) {
+              drv_command = "stop"; target_total_w = 0;
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "%s duur→Sell — SoC %.0f%% ≤ vloer %.0f%%, stop",
+                       mode.c_str(), soc_avg, soc_min);
+            } else {
+              target_total_w = (int)total_max_discharge;
+              drv_command = "discharge";
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "%s duur→Sell %.3f€ — discharge %dW (SoC %.0f%%)",
+                       mode.c_str(), tariff, target_total_w, soc_avg);
+            }
+
+          } else if (mode == "Charge" || eff == "_charge_grid") {
+            // ── CHARGE ────────────────────────────────────────
+            // Node-RED Charge: max laden tot SoC-doel, daarna stop
+            // Gebruikt charging_limiter (≥95%→1500W, ≥99%→1000W)
+            strategy_code = (mode == "Charge") ? 4 : 6;
+            sub_code = 4;
+            id(eos_str_pid_integral) = 0.0f;
+            if (soc_too_high || soc_avg >= charge_target_soc) {
+              drv_command = "stop"; target_total_w = 0;
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "%s — SoC %.0f%% ≥ doel %.0f%%, stop",
+                       mode.c_str(), soc_avg, charge_target_soc);
+            } else {
+              target_total_w = (int)total_max_charge;
+              drv_command = "charge";
+              if (mode == "Charge") {
+                snprintf(reason_buf, sizeof(reason_buf),
+                         "Charge — %dW (SoC %.0f%% → %.0f%%)",
+                         target_total_w, soc_avg, charge_target_soc);
+              } else {
+                snprintf(reason_buf, sizeof(reason_buf),
+                         "%s goedkoop %.3f€ → charge %dW (SoC %.0f%%)",
+                         mode.c_str(), tariff, target_total_w, soc_avg);
+              }
+            }
+
+          } else if (eff == "Self-consumption" || eff == "Charge PV") {
+            // ── PI FAMILIE: Self-consumption + Charge PV ──────
+            // Self-consumption: PI bidirectioneel naar 0W
+            // Charge PV:        PI, discharge geblokkeerd (= solar only)
+            // Dynamic duur:     SC bidirectioneel (eff = "Self-consumption")
+            // Dynamic normaal:  Charge PV (eff = "Charge PV")
+
+            const bool discharge_blocked = (eff == "Charge PV");
+            if (mode == "Self-consumption")            strategy_code = 3;
+            else if (mode == "Charge PV")              strategy_code = 2;
+            else /* Dynamic/Dynamic 2 */               strategy_code = 6;
+            sub_code = pi_sub;
+
+            const bool run_autotune = (mode == "Self-consumption")
+                                      && id(eos_str_autotune_sw).state;
+
+            if (run_autotune) {
+              // ── AUTOTUNE (relay-methode Ziegler-Nichols) ────
+              const float relay_amp = (float)${eos_str_at_relay_amp};
+              const float error_at  = grid_w - (float)${eos_str_sc_target_w};
+              const bool  above     = (error_at > 0.0f);
+
+              float amp = std::abs(error_at);
+              if (amp > id(eos_str_at_peak_amplitude))
+                id(eos_str_at_peak_amplitude) = amp;
+
+              if (above != id(eos_str_at_prev_above)) {
+                const uint32_t now_at = millis();
+                if (id(eos_str_at_last_cross_ms) > 0) {
+                  uint32_t half_ms = now_at - id(eos_str_at_last_cross_ms);
+                  id(eos_str_at_period_sum_ms) += half_ms * 2;
+                  id(eos_str_at_amplitude_sum) += id(eos_str_at_peak_amplitude);
+                  id(eos_str_at_peak_amplitude) = 0.0f;
+                  id(eos_str_at_osc_count)++;
+
+                  if (id(eos_str_at_osc_count) >= ${eos_str_at_osc_target}) {
+                    float pu    = (float)id(eos_str_at_period_sum_ms)
+                                  / (float)id(eos_str_at_osc_count) / 1000.0f;
+                    float avg_a = id(eos_str_at_amplitude_sum)
+                                  / (float)id(eos_str_at_osc_count);
+                    float ku    = (4.0f * relay_amp) / (3.14159f * avg_a);
+                    float new_kp = 0.45f * ku;
+                    float new_ki = 0.54f * ku / pu;
+                    { auto c = id(eos_str_pid_kp_num).make_call();
+                      c.set_value(new_kp); c.perform(); }
+                    { auto c = id(eos_str_pid_ki_num).make_call();
+                      c.set_value(new_ki); c.perform(); }
+                    id(eos_str_autotune_sw).turn_off();
+                    id(eos_str_pid_integral) = 0.0f;
+                    char at_buf[128];
+                    snprintf(at_buf, sizeof(at_buf),
+                             "Klaar! Ku=%.2f Pu=%.1fs → Kp=%.2f Ki=%.3f",
+                             ku, pu, new_kp, new_ki);
+                    id(eos_str_autotune_status).publish_state(at_buf);
+                  } else {
+                    char at_buf[64];
+                    snprintf(at_buf, sizeof(at_buf), "Oscillatie %d/%d...",
+                             id(eos_str_at_osc_count), ${eos_str_at_osc_target});
+                    id(eos_str_autotune_status).publish_state(at_buf);
+                  }
+                }
+                id(eos_str_at_last_cross_ms) = now_at;
+                id(eos_str_at_prev_above)    = above;
+              }
+
+              // Relay output
+              if (soc_too_low) {
+                drv_command = "stop"; target_total_w = 0;
+                snprintf(reason_buf, sizeof(reason_buf), "[AT] SoC te laag, stop");
+              } else if (above && soc_avg > soc_min) {
+                drv_command    = "discharge";
+                target_total_w = (int)std::min(relay_amp, total_max_discharge);
+                snprintf(reason_buf, sizeof(reason_buf),
+                         "[AT] relay discharge %dW (osc %d/%d)",
+                         target_total_w, id(eos_str_at_osc_count), ${eos_str_at_osc_target});
+              } else if (!above && !soc_too_high) {
+                drv_command    = "charge";
+                target_total_w = (int)std::min(relay_amp, total_max_charge);
+                snprintf(reason_buf, sizeof(reason_buf),
+                         "[AT] relay charge %dW (osc %d/%d)",
+                         target_total_w, id(eos_str_at_osc_count), ${eos_str_at_osc_target});
+              } else {
+                drv_command = "stop"; target_total_w = 0;
+                snprintf(reason_buf, sizeof(reason_buf), "[AT] SoC limiet, stop");
+              }
+
+            } else {
+              // ── PI CONTROLLER ──────────────────────────────
+              // Node-RED: Kp=0.75, Ki=0 (P-only; Ki inschakelen via autotune)
+              // Setpoint: 0W (NOM — Neutral Operating Mode)
+              const float kp = num_or(id(eos_str_pid_kp_num), (float)${eos_str_pid_kp_default});
+              const float ki = num_or(id(eos_str_pid_ki_num), (float)${eos_str_pid_ki_default});
+              const float error    = grid_w - (float)${eos_str_sc_target_w};
+              const float deadband = (float)${eos_str_sc_deadband_w};
+
+              const float max_int = (ki > 0.001f) ? (total_max_discharge / ki) : 30000.0f;
+              float integral = id(eos_str_pid_integral) + error;
+              integral = std::max(-max_int, std::min(max_int, integral));
+              float pid_out = kp * error + ki * integral;
+
+              // Charge PV: discharge geblokkeerd — undo integraal in die richting
+              if (discharge_blocked && pid_out > 0.0f) {
+                pid_out = 0.0f;
+                if (error > 0.0f) integral -= error;
+              }
+              // SoC veiligheidslimieten — blokkeer ook integraal accumulatie
+              if (soc_too_low  && pid_out > 0.0f) { pid_out = 0.0f; integral -= error; }
+              if (soc_too_high && pid_out < 0.0f) { pid_out = 0.0f; integral -= error; }
+
+              id(eos_str_pid_integral) = integral;
+
+              if (pid_out > deadband && soc_avg > soc_min) {
+                drv_command    = "discharge";
+                target_total_w = (int)std::min(pid_out, total_max_discharge);
+                snprintf(reason_buf, sizeof(reason_buf),
+                         "%s PI — grid %dW err %.0f → dis %dW (∫=%.0f)",
+                         eff.c_str(), (int)grid_w, error, target_total_w, integral);
+              } else if (pid_out < -deadband && !soc_too_high) {
+                float charge_pw = charging_limiter(-pid_out, soc_avg, temp_min);
+                drv_command    = "charge";
+                target_total_w = (int)std::min(charge_pw, total_max_charge);
+                snprintf(reason_buf, sizeof(reason_buf),
+                         "%s PI — grid %dW err %.0f → chg %dW (∫=%.0f)",
+                         eff.c_str(), (int)grid_w, error, target_total_w, integral);
+              } else {
+                drv_command = "stop"; target_total_w = 0;
+                id(eos_str_pid_integral) = id(eos_str_pid_integral) * 0.95f;
+                snprintf(reason_buf, sizeof(reason_buf),
+                         "%s PI — deadband, stop (∫=%.0f)",
+                         eff.c_str(), id(eos_str_pid_integral));
+              }
+            }
+
+          } else {
+            // ── DELEGATE (Handmatig, Timed, onbekend) ─────────
+            strategy_code = 8; sub_code = 8;
+            drv_command = "idle"; target_total_w = 0;
+            snprintf(reason_buf, sizeof(reason_buf), "%s — gedelegeerd", mode.c_str());
+          }
+
+          // ──────────────────────────────────────────────────────
+          // SLEW RATE LIMITER — max ${eos_str_slew_rate_w} W/s
+          // Niet voor full_stop (1), sell (5), peak_shave (7):
+          // die mogen direct naar max voor veiligheid.
+          // ──────────────────────────────────────────────────────
+          if (strategy_code != 1 && strategy_code != 5 && strategy_code != 7) {
+            const int slew = (int)${eos_str_slew_rate_w};
+            const int prev = id(eos_str_prev_target_w);
+            if (target_total_w > prev + slew) target_total_w = prev + slew;
+            if (target_total_w < prev - slew) target_total_w = prev - slew;
+          }
+          id(eos_str_prev_target_w)       = target_total_w;
+          id(eos_str_active_sub_code)     = sub_code;
+          id(eos_str_active_strategy_code) = strategy_code;
+          id(eos_str_target_total_w)       = target_total_w;
+
+          // ──────────────────────────────────────────────────────
+          // PUBLISH STATUS
+          // ──────────────────────────────────────────────────────
+          const char* strategy_name = "none";
+          switch (strategy_code) {
+            case 1: strategy_name = "full_stop"; break;
+            case 2: strategy_name = "charge_pv"; break;
+            case 3: strategy_name = "self_consumption"; break;
+            case 4: strategy_name = "charge"; break;
+            case 5: strategy_name = "sell"; break;
+            case 6: strategy_name = (eff == "_charge_grid")  ? "dynamic_charge"
+                                  : (eff == "_dynamic_sell") ? "dynamic_sell"
+                                  : (eff == "Self-consumption") ? "dynamic_sc"
+                                  : "dynamic_chargepv"; break;
+            case 7: strategy_name = ps_override ? "peak_shave_auto" : "peak_shave"; break;
+            case 8: strategy_name = "delegate"; break;
+          }
+          id(eos_str_active_text).publish_state(strategy_name);
+          id(eos_str_decision_text).publish_state(reason_buf);
+
+          // ──────────────────────────────────────────────────────
+          // STRATEGY → DRIVER
+          // ──────────────────────────────────────────────────────
+          const bool strategies_active = id(eos_str_active_switch).state;
+
+          if (!strategies_active) {
+            snprintf(shadow_buf, sizeof(shadow_buf),
+                     "[SHADOW] %s: cmd=%s pwr=%d",
+                     strategy_name, drv_command, target_total_w);
+            id(eos_str_shadow_log).publish_state(shadow_buf);
+            return;
+          }
+
+          // ACTIVE MODE: schrijf naar driver
+          auto cmd_sel = id(eos_drv_command);
+          if (cmd_sel != nullptr) {
+            if (!cmd_sel->has_state() || cmd_sel->current_option() != std::string(drv_command)) {
+              auto c = cmd_sel->make_call();
+              c.set_option(drv_command);
+              c.perform();
+            }
+          }
+
+          if (std::string(drv_command) == "charge") {
+            auto t = id(eos_drv_target_charge_w);
+            if (t != nullptr) {
+              if (!t->has_state() || (int)t->state != target_total_w) {
+                auto c = t->make_call();
+                c.set_value((float)target_total_w);
+                c.perform();
+              }
+            }
+          } else if (std::string(drv_command) == "discharge") {
+            auto t = id(eos_drv_target_discharge_w);
+            if (t != nullptr) {
+              if (!t->has_state() || (int)t->state != target_total_w) {
+                auto c = t->make_call();
+                c.set_value((float)target_total_w);
+                c.perform();
+              }
+            }
+          }
+
+          snprintf(shadow_buf, sizeof(shadow_buf),
+                   "[ACTIVE] %s: cmd=%s pwr=%d (drv_en=%s)",
+                   strategy_name, drv_command, target_total_w,
+                   id(eos_drv_enable).state ? "ON" : "OFF");
+          id(eos_str_shadow_log).publish_state(shadow_buf);

@@ -1,0 +1,73 @@
+# ==============================================================================
+# OpenQuatt — Energy OS Bridge
+# ==============================================================================
+# Doel:
+#   Voeg een HA-schrijfbaar HP cap override toe aan de OpenQuatt firmware.
+#   Het Energy OS in HA kan hiermee de warmtepomp externe throttlen,
+#   als aanvulling op de interne supervisory power limiter.
+#
+# Gebruik:
+#   1. Voeg !include toe in jouw openquatt_base.yaml (of toplevel config):
+#        packages:
+#          energy_os_bridge: !include openquatt/oq_energy_os_bridge.yaml
+#
+#   2. Hercompileer en flash de firmware.
+#
+#   3. In HA: uncomment de regel "number.openquatt_eos_hp_cap_ha" in
+#      script.eos_apply_hp_cap (in energy_os.yaml).
+#
+# Werking:
+#   - Voegt global `oq_eos_external_cap` toe (0-20, default 20 = geen beperking)
+#   - Exposed als number entity "EOS HP Cap" in HA
+#   - Elke supervisory loop wordt oq_power_cap_f geclampt op min(huidig, override)
+#
+# Veiligheid:
+#   - Default = 20 (volledig vrij) → geen invloed bij uitgeschakeld Energy OS
+#   - OpenQuatt's eigen supervisory (16A grid guard) heeft altijd prioriteit
+#   - Override werkt alleen als AANVULLENDE beperking, nooit als verhoging
+# ==============================================================================
+
+globals:
+  - id: oq_eos_external_cap
+    type: int
+    restore_value: true
+    initial_value: '20'
+
+number:
+  - platform: template
+    id: oq_eos_hp_cap_ha
+    name: "EOS HP Cap"
+    icon: mdi:heat-pump-outline
+    unit_of_measurement: "lvl"
+    min_value: 0
+    max_value: 20
+    step: 1
+    mode: slider
+    restore_value: true
+    optimistic: true
+    initial_value: 20
+    entity_category: config
+    on_value:
+      then:
+        - lambda: |-
+            int cap = (int) lroundf(x);
+            if (cap < 0) cap = 0;
+            if (cap > 20) cap = 20;
+            id(oq_eos_external_cap) = cap;
+            ESP_LOGI("eos", "External HP cap set to %d by Energy OS", cap);
+
+# Interval: pas oq_power_cap_f aan met externe cap
+# Let op: dit moet VOOR de supervisory capping uitvoeren.
+# De supervisory verlaagt oq_power_cap_f zelf al; wij beperken
+# aanvullend als de Energy OS een lagere waarde instuurt.
+interval:
+  - interval: 2s
+    then:
+      - lambda: |-
+          const int ext_cap = id(oq_eos_external_cap);
+          if (ext_cap < 20) {
+            // Alleen ingrijpen als de externe cap lager is dan de huidige waarde
+            if (id(oq_power_cap_f) > ext_cap) {
+              id(oq_power_cap_f) = ext_cap;
+            }
+          }

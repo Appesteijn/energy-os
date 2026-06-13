@@ -1,0 +1,523 @@
+# ============================================================
+# EnergyOS — Laag 4 — PLANNER (24h vooruit)
+# ============================================================
+# Heuristische planner v1.1. Loopt elke 15 minuten.
+#
+# Zonneplan API levert forecast als integers in eenheden van
+# 10^-7 EUR/kWh (dus: 2,453,140 = 0.245314 €/kWh). De macro
+# 'eos_zp_to_eur' normaliseert dit naar standaard €/kWh.
+# ============================================================
+
+# Macro voor unit-conversie + sanity check
+# Zonneplan: electricity_price in 10^-7 EUR/kWh
+template:
+  - trigger:
+      - platform: time_pattern
+        minutes: "/15"
+      - platform: state
+        entity_id: sensor.zonneplan_current_electricity_tariff
+      - platform: homeassistant
+        event: start
+    sensor:
+      # ─── Diagnostic: hoeveel forecast-items zijn er? ─────
+      - name: "eos_plan_forecast_length"
+        unique_id: eos_plan_forecast_length
+        state: >
+          {% set fc = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') %}
+          {{ fc | length if fc else 0 }}
+
+      # ─── Cheapest 3-uurs venster komende 24u ─────────────
+      - name: "eos_plan_cheapest_window_start"
+        unique_id: eos_plan_cheapest_window_start
+        state: >
+          {% set fc = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% if fc | length < 3 %}unknown
+          {% else %}
+            {% set ns = namespace(best_avg=1.0e12, best_idx=0) %}
+            {% for i in range(fc | length - 2) %}
+              {% set p0 = (fc[i].electricity_price | float(0)) / 10000000 %}
+              {% set p1 = (fc[i+1].electricity_price | float(0)) / 10000000 %}
+              {% set p2 = (fc[i+2].electricity_price | float(0)) / 10000000 %}
+              {% set avg = (p0 + p1 + p2) / 3 %}
+              {% if avg < ns.best_avg %}
+                {% set ns.best_avg = avg %}
+                {% set ns.best_idx = i %}
+              {% endif %}
+            {% endfor %}
+            {{ fc[ns.best_idx].datetime if fc[ns.best_idx].datetime is defined else 'unknown' }}
+          {% endif %}
+
+      - name: "eos_plan_cheapest_window_avg_price"
+        unique_id: eos_plan_cheapest_window_avg_price
+        unit_of_measurement: "€/kWh"
+        state: >
+          {% set fc = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% if fc | length < 3 %}0
+          {% else %}
+            {% set ns = namespace(best_avg=1.0e12) %}
+            {% for i in range(fc | length - 2) %}
+              {% set p0 = (fc[i].electricity_price | float(0)) / 10000000 %}
+              {% set p1 = (fc[i+1].electricity_price | float(0)) / 10000000 %}
+              {% set p2 = (fc[i+2].electricity_price | float(0)) / 10000000 %}
+              {% set avg = (p0 + p1 + p2) / 3 %}
+              {% if avg < ns.best_avg %}
+                {% set ns.best_avg = avg %}
+              {% endif %}
+            {% endfor %}
+            {# Sanity: als > 5 €/kWh of < 0, iets klopt niet #}
+            {% if ns.best_avg > 5 or ns.best_avg < -1 %}0
+            {% else %}{{ ns.best_avg | round(4) }}{% endif %}
+          {% endif %}
+
+      # ─── Most expensive 3-uurs venster komende 24u ───────
+      - name: "eos_plan_expensive_window_start"
+        unique_id: eos_plan_expensive_window_start
+        state: >
+          {% set fc = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% if fc | length < 3 %}unknown
+          {% else %}
+            {% set ns = namespace(worst_avg=-1.0e12, worst_idx=0) %}
+            {% for i in range(fc | length - 2) %}
+              {% set p0 = (fc[i].electricity_price | float(0)) / 10000000 %}
+              {% set p1 = (fc[i+1].electricity_price | float(0)) / 10000000 %}
+              {% set p2 = (fc[i+2].electricity_price | float(0)) / 10000000 %}
+              {% set avg = (p0 + p1 + p2) / 3 %}
+              {% if avg > ns.worst_avg %}
+                {% set ns.worst_avg = avg %}
+                {% set ns.worst_idx = i %}
+              {% endif %}
+            {% endfor %}
+            {{ fc[ns.worst_idx].datetime if fc[ns.worst_idx].datetime is defined else 'unknown' }}
+          {% endif %}
+
+      - name: "eos_plan_expensive_window_avg_price"
+        unique_id: eos_plan_expensive_window_avg_price
+        unit_of_measurement: "€/kWh"
+        state: >
+          {% set fc = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% if fc | length < 3 %}0
+          {% else %}
+            {% set ns = namespace(worst_avg=-1.0e12) %}
+            {% for i in range(fc | length - 2) %}
+              {% set p0 = (fc[i].electricity_price | float(0)) / 10000000 %}
+              {% set p1 = (fc[i+1].electricity_price | float(0)) / 10000000 %}
+              {% set p2 = (fc[i+2].electricity_price | float(0)) / 10000000 %}
+              {% set avg = (p0 + p1 + p2) / 3 %}
+              {% if avg > ns.worst_avg %}
+                {% set ns.worst_avg = avg %}
+              {% endif %}
+            {% endfor %}
+            {% if ns.worst_avg > 5 or ns.worst_avg < -1 %}0
+            {% else %}{{ ns.worst_avg | round(4) }}{% endif %}
+          {% endif %}
+
+      # ─── Spread tussen duurst en goedkoopst ──────────────
+      - name: "eos_plan_price_spread_eur_kwh"
+        unique_id: eos_plan_price_spread_eur_kwh
+        unit_of_measurement: "€/kWh"
+        state: >
+          {% set hi = states('sensor.eos_plan_expensive_window_avg_price') | float(0) %}
+          {% set lo = states('sensor.eos_plan_cheapest_window_avg_price') | float(0) %}
+          {{ (hi - lo) | round(4) }}
+
+      # ─── Verwachte arbitrage opbrengst ───────────────────
+      # Spread × bruikbare batterijcapaciteit × roundtrip-efficiency
+      - name: "eos_plan_arbitrage_savings_eur"
+        unique_id: eos_plan_arbitrage_savings_eur
+        unit_of_measurement: "€"
+        state: >
+          {% set spread = states('sensor.eos_plan_price_spread_eur_kwh') | float(0) %}
+          {% set cap = states('sensor.eos_battery_energy_max_kwh') | float(0) %}
+          {% set eff = 0.85 %}
+          {{ (spread * cap * eff) | round(2) }}
+
+      # ─── Aanbevolen actie volgend uur ────────────────────
+      - name: "eos_plan_recommended_action_next_hour"
+        unique_id: eos_plan_recommended_action_next_hour
+        state: >
+          {% set fc = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% if fc | length == 0 %}wachten
+          {% else %}
+            {% set raw_next = fc[0].electricity_price | float(0) if fc[0].electricity_price is defined else 0 %}
+            {% set next_price = raw_next / 10000000 %}
+            {% set cheap = states('input_number.eos_tariff_cheap') | float(0.10) %}
+            {% set exp = states('input_number.eos_tariff_expensive') | float(0.28) %}
+            {% set soc = states('sensor.eos_battery_soc_estimate_pct') | float(50) %}
+            {% if next_price < cheap and soc < 90 %}laden
+            {% elif next_price > exp and soc > 30 %}verkopen
+            {% elif next_price > exp %}zelfverbruik handhaven
+            {% else %}wachten{% endif %}
+          {% endif %}
+        icon: mdi:crystal-ball
+
+      # ─── Plan samenvatting (gebruikt door dashboard) ─────
+      - name: "eos_plan_summary"
+        unique_id: eos_plan_summary
+        state: >
+          {% set lo = states('sensor.eos_plan_cheapest_window_avg_price') | float(0) %}
+          {% set hi = states('sensor.eos_plan_expensive_window_avg_price') | float(0) %}
+          {% set savings = states('sensor.eos_plan_arbitrage_savings_eur') | float(0) %}
+          {% set action = states('sensor.eos_plan_recommended_action_next_hour') %}
+          {% set n = states('sensor.eos_plan_forecast_length') | int(0) %}
+          {% if n < 3 %}
+            Geen forecast beschikbaar ({{ n }} items).
+          {% else %}
+            24h plan over {{ n }} uur: laagste 3u-gem {{ lo }}€,
+            hoogste {{ hi }}€, spread {{ (hi-lo) | round(3) }}€/kWh,
+            arbitrage~{{ savings }}€, volgend uur: {{ action }}
+          {% endif %}
+
+      # ─── DHW pre-heating kans ────────────────────────────
+      # Detecteert wanneer het slim is om DHW proactief voor te verwarmen.
+      # Output: "goedkoop_tarief" | "solar_surplus" | "geen"
+      #
+      # Regels:
+      #   1. HP coördinatie moet aan zijn
+      #   2. DHW tank top onder drempel (nog niet heet genoeg)
+      #   3. Tarief niet "duur" (bij duur liever batterij verkopen)
+      #   4. Tarief is "goedkoop" (Dynamic1/2) → goedkoop_tarief
+      #   5. Solar surplus boven drempel → solar_surplus
+      #   Anders: geen kans
+      - name: "eos_dhw_preheat_opportunity"
+        unique_id: eos_dhw_preheat_opportunity
+        icon: mdi:water-boiler-alert
+        state: >
+          {% set dhw_top   = states('sensor.eos_dhw_top_c') | float(55) %}
+          {% set max_temp  = states('input_number.eos_dhw_preheat_max_temp_c') | float(52) %}
+          {% set level     = states('sensor.eos_tariff_level') %}
+          {% set d2_level  = states('sensor.eos_dynamic2_period_type') %}
+          {% set surplus   = states('sensor.eos_solar_surplus_w') | float(0) %}
+          {% set threshold = states('input_number.eos_dhw_solar_surplus_threshold_w') | float(500) %}
+          {% set hp_coord  = is_state('input_boolean.energy_os_hp_coordination', 'on') %}
+          {% set ev_laadt  = is_state('binary_sensor.eos_ev_charging', 'on') %}
+          {% if not hp_coord %}geen
+          {% elif dhw_top >= max_temp %}geen
+          {% elif level == 'duur' %}geen
+          {% elif ev_laadt and level != 'goedkoop' and d2_level != 'goedkoop' %}geen
+          {% elif level == 'goedkoop' or d2_level == 'goedkoop' %}goedkoop_tarief
+          {% elif surplus >= threshold %}solar_surplus
+          {% else %}geen{% endif %}
+
+      # ─── M15: Optimale laadinplanning ───────────────────
+      # Berekent hoeveel laadtijd nodig is en zoekt het goedkoopste
+      # aaneengesloten blok van N uur in de komende 24h forecast.
+      # Schrijft start/stop via automatie naar input_datetime (M12B).
+
+      - name: "eos_optimal_charge_hours_needed"
+        unique_id: eos_optimal_charge_hours_needed
+        unit_of_measurement: "h"
+        icon: mdi:clock-fast
+        state: >
+          {% set soc    = states('sensor.eos_battery_soc_estimate_pct') | float(50) %}
+          {% set target = states('input_number.eos_charge_target_soc') | float(100) %}
+          {% set cap    = states('input_number.eos_battery_measured_capacity_kwh') | float(15.36) %}
+          {% set rate   = states('input_number.eos_charge_power_kw') | float(6.0) %}
+          {% set gap    = [target - soc, 0] | max %}
+          {{ [(gap / 100 * cap / rate), 0] | max | round(2) }}
+
+      - name: "eos_optimal_charge_window_start"
+        unique_id: eos_optimal_charge_window_start
+        icon: mdi:clock-start
+        state: >
+          {% set fc     = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% set now_ts = as_timestamp(now()) | int %}
+          {% set soc    = states('sensor.eos_battery_soc_estimate_pct') | float(50) %}
+          {% set target = states('input_number.eos_charge_target_soc') | float(100) %}
+          {% set cap    = states('input_number.eos_battery_measured_capacity_kwh') | float(15.36) %}
+          {% set rate   = states('input_number.eos_charge_power_kw') | float(6.0) %}
+          {% set gap    = [target - soc, 0] | max %}
+          {% set hours  = [(gap / 100 * cap / rate), 0.5] | max %}
+          {% set n      = [hours | round(0, 'ceil') | int, 1] | max %}
+          {% set ns = namespace(slots=[], best_i=-1, best_cost=1e9) %}
+          {% for item in fc %}
+            {% set ts = as_timestamp(item.datetime) | int %}
+            {% if ts >= now_ts and ts < now_ts + 86400 %}
+              {% set ns.slots = ns.slots + [{'ts': ts, 'p': (item.electricity_price | float(0)) / 10000000}] %}
+            {% endif %}
+          {% endfor %}
+          {% set total = ns.slots | length %}
+          {% for i in range([total - n + 1, 0] | max) %}
+            {% set wc = namespace(v=0) %}
+            {% for j in range(n) %}
+              {% set wc.v = wc.v + ns.slots[i + j].p %}
+            {% endfor %}
+            {% if wc.v < ns.best_cost %}
+              {% set ns.best_cost = wc.v %}
+              {% set ns.best_i = i %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.best_i >= 0 %}
+            {{ ns.slots[ns.best_i].ts | timestamp_custom('%H:%M', true) }}
+          {% else %}onbekend{% endif %}
+
+      - name: "eos_optimal_charge_window_stop"
+        unique_id: eos_optimal_charge_window_stop
+        icon: mdi:clock-end
+        state: >
+          {% set fc     = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% set now_ts = as_timestamp(now()) | int %}
+          {% set soc    = states('sensor.eos_battery_soc_estimate_pct') | float(50) %}
+          {% set target = states('input_number.eos_charge_target_soc') | float(100) %}
+          {% set cap    = states('input_number.eos_battery_measured_capacity_kwh') | float(15.36) %}
+          {% set rate   = states('input_number.eos_charge_power_kw') | float(6.0) %}
+          {% set gap    = [target - soc, 0] | max %}
+          {% set hours  = [(gap / 100 * cap / rate), 0.5] | max %}
+          {% set n      = [hours | round(0, 'ceil') | int, 1] | max %}
+          {% set ns = namespace(slots=[], best_i=-1, best_cost=1e9) %}
+          {% for item in fc %}
+            {% set ts = as_timestamp(item.datetime) | int %}
+            {% if ts >= now_ts and ts < now_ts + 86400 %}
+              {% set ns.slots = ns.slots + [{'ts': ts, 'p': (item.electricity_price | float(0)) / 10000000}] %}
+            {% endif %}
+          {% endfor %}
+          {% set total = ns.slots | length %}
+          {% for i in range([total - n + 1, 0] | max) %}
+            {% set wc = namespace(v=0) %}
+            {% for j in range(n) %}
+              {% set wc.v = wc.v + ns.slots[i + j].p %}
+            {% endfor %}
+            {% if wc.v < ns.best_cost %}
+              {% set ns.best_cost = wc.v %}
+              {% set ns.best_i = i %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.best_i >= 0 %}
+            {{ (ns.slots[ns.best_i].ts + n * 3600) | timestamp_custom('%H:%M', true) }}
+          {% else %}onbekend{% endif %}
+
+      - name: "eos_optimal_charge_window_avg_price"
+        unique_id: eos_optimal_charge_window_avg_price
+        unit_of_measurement: "€/kWh"
+        icon: mdi:currency-eur
+        state: >
+          {% set fc     = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% set now_ts = as_timestamp(now()) | int %}
+          {% set soc    = states('sensor.eos_battery_soc_estimate_pct') | float(50) %}
+          {% set target = states('input_number.eos_charge_target_soc') | float(100) %}
+          {% set cap    = states('input_number.eos_battery_measured_capacity_kwh') | float(15.36) %}
+          {% set rate   = states('input_number.eos_charge_power_kw') | float(6.0) %}
+          {% set gap    = [target - soc, 0] | max %}
+          {% set hours  = [(gap / 100 * cap / rate), 0.5] | max %}
+          {% set n      = [hours | round(0, 'ceil') | int, 1] | max %}
+          {% set ns = namespace(slots=[], best_i=-1, best_cost=1e9) %}
+          {% for item in fc %}
+            {% set ts = as_timestamp(item.datetime) | int %}
+            {% if ts >= now_ts and ts < now_ts + 86400 %}
+              {% set ns.slots = ns.slots + [{'ts': ts, 'p': (item.electricity_price | float(0)) / 10000000}] %}
+            {% endif %}
+          {% endfor %}
+          {% set total = ns.slots | length %}
+          {% for i in range([total - n + 1, 0] | max) %}
+            {% set wc = namespace(v=0) %}
+            {% for j in range(n) %}
+              {% set wc.v = wc.v + ns.slots[i + j].p %}
+            {% endfor %}
+            {% if wc.v < ns.best_cost %}
+              {% set ns.best_cost = wc.v %}
+              {% set ns.best_i = i %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.best_i >= 0 and n > 0 %}
+            {{ (ns.best_cost / n) | round(4) }}
+          {% else %}0{% endif %}
+
+      # ─── M15: Optimale ontladinplanning ─────────────────
+      # Zoekt het duurste aaneengesloten N-uurs blok in de 24h forecast.
+      # N = beschikbare ontlaadtijd op basis van (SoC − vloer) × capaciteit ÷ vermogen.
+
+      - name: "eos_optimal_sell_hours_available"
+        unique_id: eos_optimal_sell_hours_available
+        unit_of_measurement: "h"
+        icon: mdi:clock-fast
+        state: >
+          {% set soc    = states('sensor.eos_battery_soc_estimate_pct') | float(50) %}
+          {% set floor  = states('input_number.eos_min_soc_for_eve_discharge') | float(30) %}
+          {% set cap    = states('input_number.eos_battery_measured_capacity_kwh') | float(15.36) %}
+          {% set rate   = states('input_number.eos_discharge_power_kw') | float(7.5) %}
+          {% set gap    = [soc - floor, 0] | max %}
+          {{ [(gap / 100 * cap / rate), 0] | max | round(2) }}
+
+      - name: "eos_optimal_sell_window_start"
+        unique_id: eos_optimal_sell_window_start
+        icon: mdi:clock-start
+        state: >
+          {% set fc     = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% set now_ts = as_timestamp(now()) | int %}
+          {% set soc    = states('sensor.eos_battery_soc_estimate_pct') | float(50) %}
+          {% set floor  = states('input_number.eos_min_soc_for_eve_discharge') | float(30) %}
+          {% set cap    = states('input_number.eos_battery_measured_capacity_kwh') | float(15.36) %}
+          {% set rate   = states('input_number.eos_discharge_power_kw') | float(7.5) %}
+          {% set gap    = [soc - floor, 0] | max %}
+          {% set hours  = [(gap / 100 * cap / rate), 0.5] | max %}
+          {% set n      = [hours | round(0, 'ceil') | int, 1] | max %}
+          {% set ns = namespace(slots=[], best_i=-1, best_cost=-1e9) %}
+          {% for item in fc %}
+            {% set ts = as_timestamp(item.datetime) | int %}
+            {% if ts >= now_ts and ts < now_ts + 86400 %}
+              {% set ns.slots = ns.slots + [{'ts': ts, 'p': (item.electricity_price | float(0)) / 10000000}] %}
+            {% endif %}
+          {% endfor %}
+          {% set total = ns.slots | length %}
+          {% for i in range([total - n + 1, 0] | max) %}
+            {% set wc = namespace(v=0) %}
+            {% for j in range(n) %}
+              {% set wc.v = wc.v + ns.slots[i + j].p %}
+            {% endfor %}
+            {% if wc.v > ns.best_cost %}
+              {% set ns.best_cost = wc.v %}
+              {% set ns.best_i = i %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.best_i >= 0 %}
+            {{ ns.slots[ns.best_i].ts | timestamp_custom('%H:%M', true) }}
+          {% else %}onbekend{% endif %}
+
+      - name: "eos_optimal_sell_window_stop"
+        unique_id: eos_optimal_sell_window_stop
+        icon: mdi:clock-end
+        state: >
+          {% set fc     = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% set now_ts = as_timestamp(now()) | int %}
+          {% set soc    = states('sensor.eos_battery_soc_estimate_pct') | float(50) %}
+          {% set floor  = states('input_number.eos_min_soc_for_eve_discharge') | float(30) %}
+          {% set cap    = states('input_number.eos_battery_measured_capacity_kwh') | float(15.36) %}
+          {% set rate   = states('input_number.eos_discharge_power_kw') | float(7.5) %}
+          {% set gap    = [soc - floor, 0] | max %}
+          {% set hours  = [(gap / 100 * cap / rate), 0.5] | max %}
+          {% set n      = [hours | round(0, 'ceil') | int, 1] | max %}
+          {% set ns = namespace(slots=[], best_i=-1, best_cost=-1e9) %}
+          {% for item in fc %}
+            {% set ts = as_timestamp(item.datetime) | int %}
+            {% if ts >= now_ts and ts < now_ts + 86400 %}
+              {% set ns.slots = ns.slots + [{'ts': ts, 'p': (item.electricity_price | float(0)) / 10000000}] %}
+            {% endif %}
+          {% endfor %}
+          {% set total = ns.slots | length %}
+          {% for i in range([total - n + 1, 0] | max) %}
+            {% set wc = namespace(v=0) %}
+            {% for j in range(n) %}
+              {% set wc.v = wc.v + ns.slots[i + j].p %}
+            {% endfor %}
+            {% if wc.v > ns.best_cost %}
+              {% set ns.best_cost = wc.v %}
+              {% set ns.best_i = i %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.best_i >= 0 %}
+            {{ (ns.slots[ns.best_i].ts + n * 3600) | timestamp_custom('%H:%M', true) }}
+          {% else %}onbekend{% endif %}
+
+      - name: "eos_optimal_sell_window_avg_price"
+        unique_id: eos_optimal_sell_window_avg_price
+        unit_of_measurement: "€/kWh"
+        icon: mdi:currency-eur
+        state: >
+          {% set fc     = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% set now_ts = as_timestamp(now()) | int %}
+          {% set soc    = states('sensor.eos_battery_soc_estimate_pct') | float(50) %}
+          {% set floor  = states('input_number.eos_min_soc_for_eve_discharge') | float(30) %}
+          {% set cap    = states('input_number.eos_battery_measured_capacity_kwh') | float(15.36) %}
+          {% set rate   = states('input_number.eos_discharge_power_kw') | float(7.5) %}
+          {% set gap    = [soc - floor, 0] | max %}
+          {% set hours  = [(gap / 100 * cap / rate), 0.5] | max %}
+          {% set n      = [hours | round(0, 'ceil') | int, 1] | max %}
+          {% set ns = namespace(slots=[], best_i=-1, best_cost=-1e9) %}
+          {% for item in fc %}
+            {% set ts = as_timestamp(item.datetime) | int %}
+            {% if ts >= now_ts and ts < now_ts + 86400 %}
+              {% set ns.slots = ns.slots + [{'ts': ts, 'p': (item.electricity_price | float(0)) / 10000000}] %}
+            {% endif %}
+          {% endfor %}
+          {% set total = ns.slots | length %}
+          {% for i in range([total - n + 1, 0] | max) %}
+            {% set wc = namespace(v=0) %}
+            {% for j in range(n) %}
+              {% set wc.v = wc.v + ns.slots[i + j].p %}
+            {% endfor %}
+            {% if wc.v > ns.best_cost %}
+              {% set ns.best_cost = wc.v %}
+              {% set ns.best_i = i %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.best_i >= 0 and n > 0 %}
+            {{ (ns.best_cost / n) | round(4) }}
+          {% else %}0{% endif %}
+
+      # ─── M15: Verkoop-spread beslissing ─────────────────
+      # Vergelijkt gem. verkoopvenster met gem. laadvenster.
+      # Als spread >= eos_sell_min_spread_eur → "verkopen"
+      # Anders → "zelfverbruik"
+      - name: "eos_sell_spread_eur"
+        unique_id: eos_sell_spread_eur
+        unit_of_measurement: "€/kWh"
+        icon: mdi:delta
+        state: >
+          {% set sell  = states('sensor.eos_optimal_sell_window_avg_price') | float(0) %}
+          {% set buy   = states('sensor.eos_optimal_charge_window_avg_price') | float(0) %}
+          {{ (sell - buy) | round(4) }}
+
+      - name: "eos_sell_decision"
+        unique_id: eos_sell_decision
+        icon: mdi:scale-balance
+        state: >
+          {% set spread = states('sensor.eos_sell_spread_eur') | float(0) %}
+          {% set delta  = states('input_number.eos_sell_min_spread_eur') | float(0.30) %}
+          {% if spread >= delta %}verkopen
+          {% else %}zelfverbruik{% endif %}
+
+      # ─── Dynamic 2: pair-matching periode type ───────────
+      # Markeert huidig uur als "goedkoop", "duur" of "normaal"
+      # via Zonneplan all-hours pair-matching algoritme:
+      #   1. Verzamel komende 24h uurslots
+      #   2. Sorteer op prijs oplopend
+      #   3. Markeer N goedkoopste als "goedkoop"
+      #   4. Markeer N duurste als "duur" (alleen als spread ≥ min_delta)
+      #   5. Check of huidig uur in een gemarkeerd slot valt
+      - name: "eos_dynamic2_period_type"
+        unique_id: eos_dynamic2_period_type
+        icon: mdi:clock-time-eight-outline
+        state: >
+          {% set fc = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% set cheapest_n = states('input_number.eos_dynamic2_cheapest_hrs') | float(4) | int %}
+          {% set expensive_n = states('input_number.eos_dynamic2_expensive_hrs') | float(4) | int %}
+          {% set min_delta = states('input_number.eos_dynamic2_min_delta_eur') | float(0.05) %}
+          {% set now_ts = as_timestamp(now()) | int %}
+          {% set window_end = now_ts + 86400 %}
+
+          {# Verzamel uurslots binnen 24h-venster #}
+          {% set ns = namespace(slots=[]) %}
+          {% for item in fc %}
+            {% set ts = as_timestamp(item.datetime) | int %}
+            {% if ts >= now_ts - 1800 and ts <= window_end %}
+              {% set p = (item.electricity_price | float(0)) / 10000000 %}
+              {% set ns.slots = ns.slots + [{'p': p, 'ts': ts}] %}
+            {% endif %}
+          {% endfor %}
+
+          {# Sorteer op prijs oplopend #}
+          {% set sorted = ns.slots | sort(attribute='p') %}
+          {% set n = sorted | length %}
+
+          {# Goedkope slots: laagste N #}
+          {% set ns2 = namespace(cheap_ts=[], exp_ts=[], cheap_sum=0.0) %}
+          {% set nc = [cheapest_n, n] | min %}
+          {% for i in range(nc) %}
+            {% set ns2.cheap_ts = ns2.cheap_ts + [sorted[i].ts] %}
+            {% set ns2.cheap_sum = ns2.cheap_sum + sorted[i].p %}
+          {% endfor %}
+          {% set cheap_avg = (ns2.cheap_sum / nc) if nc > 0 else 0 %}
+
+          {# Dure slots: hoogste N — maar alleen als spread ≥ min_delta t.o.v. goedkoop gemiddelde #}
+          {% set ne = [expensive_n, n] | min %}
+          {% for i in range(ne) %}
+            {% set slot = sorted[n - 1 - i] %}
+            {% if (slot.p - cheap_avg) >= min_delta %}
+              {% set ns2.exp_ts = ns2.exp_ts + [slot.ts] %}
+            {% endif %}
+          {% endfor %}
+
+          {# Bepaal huidig uur (afgerond naar hele uren) #}
+          {% set hour_ts = (now_ts // 3600) * 3600 %}
+          {% if hour_ts in ns2.cheap_ts %}goedkoop
+          {% elif hour_ts in ns2.exp_ts %}duur
+          {% else %}normaal{% endif %}

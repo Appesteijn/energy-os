@@ -1,0 +1,479 @@
+# ============================================================
+# EnergyOS Supervisor — ESP32 firmware module
+# ============================================================
+# Doel: real-time dispatcher + HA-watchdog op de Marstek
+#       LilyGO ESP32-S3 (T-Connect).
+#
+# Toevoegen aan de Marstek YAML config door uit te breiden:
+#
+#   packages:
+#     # ... bestaande marstek_m1, m2, m3 entries ...
+#     eos_supervisor: !include eos_supervisor.yaml
+#
+# Verantwoordelijkheden:
+#   - HA-data abonneren (tariff, modus, P1, SoC)
+#   - Lokale dispatcher loop elke 5s
+#   - HA-heartbeat watchdog (timeout 5 min)
+#   - Lokale fallback HP-cap bij HA-uitval
+#   - Decision code + reden publiceren naar HA + lokale web UI
+#   - HP cap doorpushen naar HA's input_number.eos_hp_cap_override
+#
+# NIET in deze versie:
+#   - Direct schrijven naar OpenQuatt ESP (zou via http_request
+#     kunnen; voeg later toe als HA-down resilience nodig is)
+#   - Direct Modbus-writes naar batterijen (Marstek strategy
+#     blijft via HA's input_select voor consistentie)
+#
+# Hardware impact:
+#   - 2 nieuwe interval loops (5s + 30s) — minimaal CPU
+#   - ~12 HA subscription sensors — minimaal RAM
+#   - Geen extra UART/SPI/I2C
+# ============================================================
+
+substitutions:
+  eos_loop_s: "1"
+  eos_ha_timeout_s: "300"
+  eos_p1_host: "192.168.1.7"
+  eos_p1_timeout_ms: "1500"       # ruimte voor trage P1 response
+  eos_p1_poll_s: "2"              # interval P1 directe polling (2s minder agressief dan 1s)
+  eos_p1_max_fail: "3"            # aantal opeenvolgende mislukkingen voor disconnected
+  eos_safe_hp_cap: "12"
+  eos_hp_cap_sell: "8"
+  eos_hp_cap_charge: "6"
+  eos_hp_cap_peak: "10"
+  eos_grid_hard_default_w: "5500"
+
+# ─── State globals ─────────────────────────────────────────
+globals:
+  - id: eos_ha_last_seen_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  - id: eos_ha_alive
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: eos_local_safe_mode
+    type: bool
+    restore_value: false
+    initial_value: 'true'   # boot in safe mode tot HA bevestigd is
+
+  - id: eos_decision_code
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: eos_last_hp_cap
+    type: int
+    restore_value: false
+    initial_value: '20'
+
+  - id: eos_last_pushed_cap
+    type: int
+    restore_value: false
+    initial_value: '-1'  # forceert eerste push
+
+  # ─── P1 direct ──────────────────────────────────────────────
+  - id: eos_p1_direct_w
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: eos_p1_direct_connected
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: eos_p1_direct_last_ok_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: eos_p1_fail_count
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+# ─── P1 direct HTTP polling ────────────────────────────────
+http_request:
+  verify_ssl: false
+  timeout: ${eos_p1_timeout_ms}ms
+
+# ─── HA-state abonnementen ─────────────────────────────────
+# Elke on_value-trigger update de heartbeat — zolang HA-data
+# blijft binnenstromen, is HA "alive".
+sensor:
+  - platform: homeassistant
+    id: eos_ha_tariff_eur_kwh
+    entity_id: sensor.eos_tariff_eur_kwh
+    on_value:
+      - lambda: 'id(eos_ha_last_seen_ms) = millis();'
+
+  - platform: homeassistant
+    id: eos_ha_grid_power_w
+    entity_id: sensor.eos_grid_power_w
+    on_value:
+      - lambda: 'id(eos_ha_last_seen_ms) = millis();'
+
+  - platform: homeassistant
+    id: eos_ha_solar_surplus_w
+    entity_id: sensor.eos_solar_surplus_w
+    on_value:
+      - lambda: 'id(eos_ha_last_seen_ms) = millis();'
+
+  - platform: homeassistant
+    id: eos_ha_battery_soc
+    entity_id: sensor.eos_battery_soc_estimate_pct
+    on_value:
+      - lambda: 'id(eos_ha_last_seen_ms) = millis();'
+
+  - platform: homeassistant
+    id: eos_ha_grid_hard_limit_w
+    entity_id: input_number.eos_grid_hard_limit_w
+
+  - platform: homeassistant
+    id: eos_ha_tariff_cheap
+    entity_id: input_number.eos_tariff_cheap
+
+  - platform: homeassistant
+    id: eos_ha_tariff_expensive
+    entity_id: input_number.eos_tariff_expensive
+
+  - platform: homeassistant
+    id: eos_ha_min_soc
+    entity_id: input_number.eos_min_soc_for_eve_discharge
+
+  - platform: template
+    name: "P1 Direct Netto Vermogen"
+    id: p1_direct_power_w
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    update_interval: never
+    icon: mdi:meter-electric
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 10
+
+text_sensor:
+  - platform: homeassistant
+    id: eos_ha_mode
+    entity_id: input_select.energy_os_mode
+
+  - platform: homeassistant
+    id: eos_ha_tariff_level
+    entity_id: sensor.eos_tariff_level
+
+  - platform: homeassistant
+    id: eos_ha_dynamic2_level
+    entity_id: sensor.eos_dynamic2_period_type
+    # "goedkoop" / "duur" / "normaal" — pair-matching via Zonneplan 24h forecast
+
+  # ─── Eigen outputs (lokale UI + HA mirror) ──────────────
+  - platform: template
+    name: "EOS Supervisor Decision"
+    id: eos_supervisor_decision
+    icon: mdi:state-machine
+    update_interval: never
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 1
+
+  - platform: template
+    name: "EOS Supervisor Reason"
+    id: eos_supervisor_reason
+    icon: mdi:lightbulb-question
+    update_interval: never
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 2
+
+# ─── HA boolean abonnementen ───────────────────────────────
+binary_sensor:
+  - platform: homeassistant
+    id: eos_ha_dynamic_sell_on_expensive
+    entity_id: input_boolean.eos_dynamic_sell_on_expensive
+
+  - platform: homeassistant
+    id: eos_ha_peak_shave_in_manual
+    entity_id: input_boolean.eos_peak_shave_in_manual
+
+  - platform: homeassistant
+    id: eos_ha_ev_charging
+    entity_id: binary_sensor.eos_ev_charging
+
+  - platform: homeassistant
+    id: eos_ha_ev_protection_enabled
+    entity_id: input_boolean.eos_ev_protection_enabled
+
+# ─── Status & control ──────────────────────────────────────
+  - platform: template
+    name: "P1 Direct Bereikbaar"
+    id: p1_direct_reachable
+    device_class: connectivity
+    icon: mdi:lan-check
+    lambda: 'return id(eos_p1_direct_connected);'
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 11
+
+  - platform: template
+    name: "EOS HA alive"
+    id: eos_ha_alive_bs
+    device_class: connectivity
+    icon: mdi:lan-connect
+    lambda: 'return id(eos_ha_alive);'
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 3
+
+  - platform: template
+    name: "EOS Safe Mode actief"
+    id: eos_safe_mode_bs
+    device_class: safety
+    icon: mdi:shield-check
+    lambda: 'return id(eos_local_safe_mode);'
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 4
+
+switch:
+  - platform: template
+    name: "EOS Force Safe Mode"
+    id: eos_force_safe_mode
+    icon: mdi:shield-lock
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    entity_category: config
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 10
+
+  - platform: template
+    name: "EOS Push naar HA"
+    id: eos_push_to_ha
+    icon: mdi:upload-network
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    entity_category: config
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 11
+
+number:
+  - platform: template
+    name: "EOS HP cap (berekend)"
+    id: eos_supervisor_hp_cap
+    min_value: 0
+    max_value: 20
+    step: 1
+    initial_value: 20
+    optimistic: true
+    restore_value: false
+    mode: slider
+    icon: mdi:heat-pump-outline
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 5
+
+# ─── HOOFDLOOP ─────────────────────────────────────────────
+interval:
+  - interval: ${eos_p1_poll_s}s
+    startup_delay: 5s
+    then:
+      - http_request.get:
+          url: "http://${eos_p1_host}/sensor/netto_vermogen_watt"
+          capture_response: true
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code != 200) {
+                    id(eos_p1_fail_count)++;
+                    if (id(eos_p1_fail_count) >= ${eos_p1_max_fail})
+                      id(eos_p1_direct_connected) = false;
+                    ESP_LOGW("p1_direct", "HTTP %d — fout %d/%d",
+                             response->status_code, id(eos_p1_fail_count), ${eos_p1_max_fail});
+                    return;
+                  }
+                  float val = 0.0f;
+                  bool parsed = false;
+                  json::parse_json(body, [&val, &parsed](JsonObject root) -> bool {
+                    if (!root["value"].isNull()) {
+                      val = root["value"].as<float>();
+                      parsed = true;
+                    }
+                    return true;
+                  });
+                  if (parsed) {
+                    id(eos_p1_direct_w) = val;
+                    id(eos_p1_direct_connected) = true;
+                    id(eos_p1_fail_count) = 0;
+                    id(eos_p1_direct_last_ok_ms) = millis();
+                    id(p1_direct_power_w).publish_state(val);
+                  } else {
+                    id(eos_p1_fail_count)++;
+                    if (id(eos_p1_fail_count) >= ${eos_p1_max_fail})
+                      id(eos_p1_direct_connected) = false;
+                    ESP_LOGW("p1_direct", "JSON parse mislukt: %s", body.c_str());
+                  }
+
+  - interval: ${eos_loop_s}s
+    startup_delay: 10s
+    then:
+      - lambda: |-
+          // ──────────────────────────────────────────────
+          // 1) HA heartbeat
+          // ──────────────────────────────────────────────
+          const uint32_t now_ms = millis();
+          const uint32_t timeout_ms = (uint32_t) ${eos_ha_timeout_s} * 1000UL;
+          uint32_t age_ms = UINT32_MAX;
+          if (id(eos_ha_last_seen_ms) > 0 && now_ms >= id(eos_ha_last_seen_ms)) {
+            age_ms = now_ms - id(eos_ha_last_seen_ms);
+          }
+          const bool ha_fresh = (age_ms < timeout_ms);
+          id(eos_ha_alive) = ha_fresh;
+          id(eos_ha_alive_bs).publish_state(ha_fresh);
+
+          // ──────────────────────────────────────────────
+          // 2) Safe-mode bepaling
+          // ──────────────────────────────────────────────
+          const bool force_safe = id(eos_force_safe_mode).state;
+          id(eos_local_safe_mode) = (!ha_fresh) || force_safe;
+          id(eos_safe_mode_bs).publish_state(id(eos_local_safe_mode));
+
+          // ──────────────────────────────────────────────
+          // 3) Lees inputs (val terug op defaults bij ontbreken)
+          // ──────────────────────────────────────────────
+          auto val_or = [](esphome::sensor::Sensor* s, float def) -> float {
+            return (s != nullptr && s->has_state() && !isnan(s->state)) ? s->state : def;
+          };
+
+          const float tariff   = val_or(id(eos_ha_tariff_eur_kwh),  0.20f);
+          const float cheap    = val_or(id(eos_ha_tariff_cheap),    0.10f);
+          const float expensv  = val_or(id(eos_ha_tariff_expensive),0.28f);
+          const float grid_w   = id(eos_p1_direct_connected)
+                                 ? id(eos_p1_direct_w)
+                                 : val_or(id(eos_ha_grid_power_w), 0.0f);
+          const float surplus  = val_or(id(eos_ha_solar_surplus_w), 0.0f);
+          const float soc      = val_or(id(eos_ha_battery_soc),     50.0f);
+          const float hard_lim = val_or(id(eos_ha_grid_hard_limit_w), (float)${eos_grid_hard_default_w});
+          const float soc_min  = val_or(id(eos_ha_min_soc),         20.0f);
+
+          std::string mode = "Handmatig";
+          if (id(eos_ha_mode) != nullptr && id(eos_ha_mode)->has_state()) {
+            mode = id(eos_ha_mode)->state;
+          }
+
+          // ──────────────────────────────────────────────
+          // 4) Beslissingsboom
+          // ──────────────────────────────────────────────
+          int desired_cap = 20;
+          int decision = 0;
+          char reason_buf[160];
+          reason_buf[0] = '\0';
+
+          if (id(eos_local_safe_mode)) {
+            desired_cap = ${eos_safe_hp_cap};
+            decision = 1;
+            if (id(eos_ha_last_seen_ms) == 0) {
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "SAFE MODE — nog geen HA-data ontvangen (cap=%d)",
+                       desired_cap);
+            } else if (force_safe) {
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "SAFE MODE — Force Safe Mode aan (cap=%d)",
+                       desired_cap);
+            } else {
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "SAFE MODE — HA stilte %us (cap=%d)",
+                       (unsigned) (age_ms / 1000UL), desired_cap);
+            }
+          } else if (mode == "Handmatig") {
+            desired_cap = 20;
+            decision = 2;
+            snprintf(reason_buf, sizeof(reason_buf),
+                     "Handmatig — supervisor grijpt niet in");
+          } else if (grid_w > hard_lim) {
+            desired_cap = ${eos_hp_cap_peak};
+            decision = 3;
+            snprintf(reason_buf, sizeof(reason_buf),
+                     "Grid %dW > hard limit %dW — HP peak throttle",
+                     (int) grid_w, (int) hard_lim);
+          } else if (mode == "Full stop" || mode == "Charge PV"
+                     || mode == "Self-consumption" || mode == "Peak shave"
+                     || mode == "Timed") {
+            desired_cap = 20;
+            decision = 4;
+            snprintf(reason_buf, sizeof(reason_buf), "%s — HP vrij", mode.c_str());
+          } else if (mode == "Sell") {
+            desired_cap = ${eos_hp_cap_sell};
+            decision = 8;
+            snprintf(reason_buf, sizeof(reason_buf),
+                     "Sell — HP throttle (cap=%d)", desired_cap);
+          } else if (mode == "Charge") {
+            desired_cap = ${eos_hp_cap_charge};
+            decision = 9;
+            snprintf(reason_buf, sizeof(reason_buf),
+                     "Charge — HP throttle (cap=%d)", desired_cap);
+          } else {
+            // Dynamic / Dynamic 2: HP cap op basis van tarief
+            if (tariff > expensv && soc > (soc_min + 10.0f)) {
+              desired_cap = ${eos_hp_cap_sell};
+              decision = 11;
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "Dynamic duur %.3f€ + SoC %.0f%% — HP throttle",
+                       tariff, soc);
+            } else if (tariff < cheap && soc < 95.0f) {
+              desired_cap = ${eos_hp_cap_charge};
+              decision = 12;
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "Dynamic goedkoop %.3f€ — HP throttle voor laden",
+                       tariff);
+            } else {
+              desired_cap = 20;
+              decision = 10;
+              snprintf(reason_buf, sizeof(reason_buf),
+                       "Dynamic normaal — HP vrij (tarief %.3f€, SoC %.0f%%)",
+                       tariff, soc);
+            }
+          }
+
+          id(eos_decision_code) = decision;
+          id(eos_last_hp_cap) = desired_cap;
+
+          // ──────────────────────────────────────────────
+          // 5) Publish lokale UI + HA mirror
+          // ──────────────────────────────────────────────
+          id(eos_supervisor_hp_cap).publish_state((float) desired_cap);
+
+          char decision_buf[32];
+          snprintf(decision_buf, sizeof(decision_buf), "%d", decision);
+          id(eos_supervisor_decision).publish_state(decision_buf);
+
+          id(eos_supervisor_reason).publish_state(reason_buf);
+
+  # ─── Push cap naar HA (alleen bij verandering of ververs) ─
+  - interval: 30s
+    startup_delay: 30s
+    then:
+      - if:
+          condition:
+            and:
+              - lambda: 'return id(eos_ha_alive);'
+              - switch.is_on: eos_push_to_ha
+              - lambda: 'return id(eos_last_pushed_cap) != id(eos_last_hp_cap);'
+          then:
+            - homeassistant.action:
+                action: input_number.set_value
+                data:
+                  entity_id: input_number.eos_hp_cap_override
+                  value: !lambda 'return std::to_string(id(eos_last_hp_cap));'
+            - lambda: 'id(eos_last_pushed_cap) = id(eos_last_hp_cap);'
+
+# ─── Externe ping action (optioneel) ──────────────────────
+# Laat HA expliciet "ik leef nog" sturen via een script:
+#   action: esphome.marstek_3x_eos_ping
+api:
+  actions:
+    - action: eos_ping
+      then:
+        - lambda: 'id(eos_ha_last_seen_ms) = millis();'

@@ -1,0 +1,197 @@
+# ============================================================
+# EnergyOS Supervisor — DEV BOARD standalone test config
+# ============================================================
+# Doel: de supervisor module testen op een losse ESP32-S3 dev
+#       board ZONDER de Marstek Modbus context.
+#
+# Wat hij doet op een dev board:
+#   - Abonneert op alle EOS sensoren in HA
+#   - Draait de beslissingsboom elke 5s
+#   - Toont decision + reason op http://eos-dev.local/
+#   - Pusht HP cap naar HA's input_number.eos_hp_cap_override
+#     (zet de "Push naar HA" switch UIT om dit te voorkomen
+#      tijdens testen!)
+#
+# Hardware:
+#   - Elke ESP32-S3 dev board (DevKitC-1, T-Display, etc.)
+#   - Alleen WiFi + USB stroom — geen Modbus, geen sensors
+# ============================================================
+
+substitutions:
+  name: eos-dev
+  friendly_name: "EOS Dev Board"
+
+esphome:
+  name: ${name}
+  min_version: 2025.11.0
+  name_add_mac_suffix: false
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+api:
+  reboot_timeout: 0s
+  encryption:
+    key: !secret api_encryption_key
+  # Genereer een key via ESPHome dashboard, of in een terminal:
+  #   python -c "import secrets, base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"
+  # Plaats hem in secrets.yaml als:
+  #   api_encryption_key: "BASE64KEY=="
+  #
+  # Tip: gebruik dezelfde key als je Marstek-ESP — dan kun je
+  #      dezelfde "EnergyOS" credentials hergebruiken.
+
+ota:
+  - platform: esphome
+  - platform: web_server
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  reboot_timeout: 0s
+  fast_connect: true
+  power_save_mode: high
+  ap:
+    ssid: "${friendly_name} Hotspot"
+    password: "configesp"
+    ap_timeout: 15s
+
+captive_portal:
+  id: id_captive_portal
+
+# ─── P1 direct polling ──────────────────────────────────────
+# Haalt netto vermogen rechtstreeks op van de P1-ESP (192.168.1.7)
+# zonder HA als tussenstap. Zichtbaar in de web UI naast de
+# HA-bron uit de supervisor — handig om te vergelijken.
+http_request:
+  verify_ssl: false
+  timeout: 800ms
+
+globals:
+  - id: p1_direct_last_ok_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: p1_direct_connected
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+web_server:
+  port: 80
+  version: 3
+  include_internal: false
+  local: true
+  sorting_groups:
+    - id: Status
+      name: "Status"
+      sorting_weight: -30
+    - id: Control
+      name: "Control"
+      sorting_weight: -20
+    - id: Diagnostic
+      name: "Diagnostic"
+      sorting_weight: -10
+
+# ─── Diagnostiek ────────────────────────────────────────────
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: IP
+      icon: mdi:ip
+      web_server:
+        sorting_group_id: Diagnostic
+        sorting_weight: 4
+    ssid:
+      name: SSID
+      icon: mdi:wifi
+      web_server:
+        sorting_group_id: Diagnostic
+        sorting_weight: 3
+
+sensor:
+  - platform: wifi_signal
+    name: WiFi Signal
+    id: wifi_strength
+    update_interval: 30s
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 5
+
+  - platform: uptime
+    name: Uptime
+    update_interval: 60s
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 6
+
+  # ─── P1 direct ────────────────────────────────────────────
+  - platform: template
+    name: "P1 Direct Netto Vermogen"
+    id: p1_direct_power_w
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    update_interval: never
+    icon: mdi:meter-electric
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 10
+
+binary_sensor:
+  - platform: template
+    name: "P1 Direct Bereikbaar"
+    id: p1_direct_reachable
+    device_class: connectivity
+    icon: mdi:lan-check
+    lambda: 'return id(p1_direct_connected);'
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 11
+
+# ─── P1 poll-interval ────────────────────────────────────────
+# Endpoint: http://192.168.1.7/sensor/p1_netto_vermogen_watt
+# JSON response: {"id":"...","value":"1234.0","state":"1234 W"}
+interval:
+  - interval: 1s
+    startup_delay: 20s
+    then:
+      - lambda: 'id(p1_direct_connected) = false;'
+      - http_request.get:
+          url: "http://192.168.1.7/sensor/p1_netto_vermogen_watt"
+          capture_response: true
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code != 200) {
+                    ESP_LOGW("p1_direct", "HTTP %d van 192.168.1.7", response->status_code);
+                    return;
+                  }
+                  float val = 0.0f;
+                  bool parsed = false;
+                  json::parse_json(response->data, [&val, &parsed](JsonObject root) -> bool {
+                    if (!root["value"].isNull()) {
+                      val = root["value"].as<float>();
+                      parsed = true;
+                    }
+                    return true;
+                  });
+                  if (parsed) {
+                    id(p1_direct_connected) = true;
+                    id(p1_direct_power_w).publish_state(val);
+                    id(p1_direct_last_ok_ms) = millis();
+                    ESP_LOGD("p1_direct", "P1 direct: %.0f W", val);
+                  } else {
+                    ESP_LOGW("p1_direct", "JSON parse mislukt");
+                  }
+
+# ─── EnergyOS Supervisor ────────────────────────────────────
+packages:
+  eos_supervisor: !include eos_supervisor.yaml

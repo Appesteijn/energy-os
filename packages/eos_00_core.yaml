@@ -1,0 +1,562 @@
+# ============================================================
+# EnergyOS — Laag 0 — CORE
+# ============================================================
+# Master switches, modus selectie, profielen, doel-gewichten.
+# Geen logica hier; alleen configuratie die andere lagen lezen.
+# ============================================================
+
+# ─── Master switches ───────────────────────────────────────
+input_boolean:
+  energy_os_enabled:
+    name: "Energy OS Actief"
+    icon: mdi:lightning-bolt-circle
+
+  energy_os_debug:
+    name: "Energy OS Debug Logging"
+    icon: mdi:bug-outline
+
+  energy_os_hp_coordination:
+    name: "HP coördinatie aan"
+    icon: mdi:heat-pump-outline
+
+  energy_os_planner_enabled:
+    name: "24h Planner aan"
+    icon: mdi:calendar-clock
+
+  energy_os_anomaly_detection:
+    name: "Anomalie detectie aan"
+    icon: mdi:radar
+
+  eos_dynamic_sell_on_expensive:
+    name: "Dynamic: verkoop bij duur tarief"
+    icon: mdi:cash-fast
+    # AAN  → duur uur in Dynamic/Dynamic 2 → max ontladen (Sell)
+    # UIT  → duur uur in Dynamic/Dynamic 2 → Self-consumption PI (Node-RED gedrag)
+
+  eos_peak_shave_in_manual:
+    name: "Peak shave actief in Handmatig/Timed"
+    icon: mdi:shield-alert-outline
+    # AAN  → peak shave overlay ook actief in Handmatig/Timed modus
+    # UIT  → Handmatig/Timed volledig gedelegeerd aan Node-RED (default)
+
+  eos_tariff_auto_threshold:
+    name: "Tariefdrempel: automatisch via 24h forecast"
+    icon: mdi:chart-bar
+    initial: true
+    # AAN → goedkoop/duur drempel berekend uit Zonneplan 24h prijscurve
+    # UIT → vaste drempels (input_number.eos_tariff_cheap/expensive)
+
+  eos_dhw_solar_boost_enabled:
+    name: "DHW solar boost: toestaan (EOS)"
+    icon: mdi:water-boiler-auto
+    initial: false
+    # Handmatige permissie-toggle. Als UIT → EOS activeert nooit automatisch de boost.
+
+  eos_dhw_solar_boost_active:
+    name: "DHW solar boost actief (EOS)"
+    icon: mdi:water-boiler-check
+    initial: false
+    # Operationele toestand — EOS zet dit AAN/UIT op basis van kans + toestemming.
+    # OpenQuatt leest binary_sensor.openquatt_ext_dhw_solar_boost (bridge in eos_01_data).
+
+  eos_ev_protection_enabled:
+    name: "EV beveiliging: blokkeer laden tijdens EV charging"
+    icon: mdi:ev-station
+    # AAN (default) → batterijen laden GEBLOKKEERD zodra auto aan lader staat
+    # UIT → beveiliging uit (alleen als slimme laadpaal zelf coördineert)
+
+  # ─── M12B: Timed schema ──────────────────────────────────
+  eos_timed_schedule_enabled:
+    name: "Timed schema actief"
+    icon: mdi:calendar-clock
+    # AAN → EOS schakelt automatisch naar Charge tussen start en stop tijden
+
+  # ─── M15: Optimale laadinplanning ────────────────────────
+  eos_optimal_charge_enabled:
+    name: "Optimaal laden: automatisch inplannen"
+    icon: mdi:calendar-star
+    initial: false
+    # AAN → berekent goedkoopste N-uurs venster in 24h forecast en schrijft
+    #       dit automatisch naar het timed schema (M12B) + activeert dat schema
+
+  eos_timed_sell_enabled:
+    name: "Verkoop schema actief"
+    icon: mdi:calendar-arrow-up
+
+  eos_optimal_sell_enabled:
+    name: "Optimaal ontladen: automatisch inplannen"
+    icon: mdi:calendar-minus
+    initial: false
+    # AAN → berekent duurste N-uurs venster in 24h forecast en plant Sell modus
+
+  # ─── M13: SoH cyclus tracking ────────────────────────────
+  eos_battery_soh_cycle_active:
+    name: "SoH cyclus meting actief"
+    icon: mdi:battery-sync
+
+# ─── Modus selector ────────────────────────────────────────
+input_select:
+  energy_os_mode:
+    name: "Energy OS Modus"
+    options:
+      - Dynamic             # Tariefgestuurd: goedkoop→Charge, duur→SC, normaal→Charge PV
+      - Dynamic 2           # Idem, all-hours pair-matching (tarief-level via Zonneplan)
+      - Charge PV           # PI naar 0W, discharge geblokkeerd (zonnestroom)
+      - Self-consumption    # PI bidirectioneel naar 0W grid
+      - Charge              # Max laden tot SoC-doel, dan stop
+      - Sell                # Max ontladen tot SoC-vloer (constant vermogen)
+      - Peak shave          # Import begrenzen op hard limit
+      - Timed               # Tijdsgebaseerd (gedelegeerd)
+      - Full stop           # Alle batterijen stop
+      - Handmatig           # Node-RED leidend
+    initial: Dynamic
+    icon: mdi:tune-vertical
+
+  eos_charge_goal_reached:
+    name: "Charge: na vol → modus"
+    options:
+      - Charge PV
+      - Self-consumption
+      - Dynamic
+      - Dynamic 2
+      - Full stop
+    initial: Charge PV
+    icon: mdi:battery-check
+
+  eos_sell_goal_reached:
+    name: "Sell: na leeg → modus"
+    options:
+      - Full stop
+      - Self-consumption
+      - Charge PV
+      - Dynamic
+      - Dynamic 2
+    initial: Full stop
+    icon: mdi:battery-off-outline
+
+  eos_timed_after_charge_mode:
+    name: "Timed schema: na laden → modus"
+    options:
+      - Charge PV
+      - Self-consumption
+      - Dynamic
+      - Dynamic 2
+      - Full stop
+    initial: Charge PV
+    icon: mdi:calendar-arrow-right
+
+  eos_timed_after_sell_mode:
+    name: "Verkoop schema: na ontladen → modus"
+    options:
+      - Self-consumption
+      - Charge PV
+      - Dynamic
+      - Dynamic 2
+      - Full stop
+    initial: Self-consumption
+    icon: mdi:calendar-arrow-right
+
+  energy_os_profile:
+    name: "Energy OS Profiel"
+    options:
+      - Werkdag        # comfort hoog, kosten hoog, zelfverbruik normaal
+      - Weekend Thuis  # comfort hoog, kosten normaal, zelfverbruik hoog
+      - Vakantie       # comfort laag, kosten hoog, zelfverbruik hoog
+      - Koude Piek     # comfort hoog, kosten laag, levensduur laag
+      - Zonnige Dag    # zelfverbruik maximaal
+      - Aangepast      # gebruik de losse sliders
+    initial: Werkdag
+    icon: mdi:account-cog
+
+# ─── Doel-gewichten (0-10) ─────────────────────────────────
+# Worden door de planner gebruikt als kostenfunctie-coëfficiënten.
+input_number:
+  eos_goal_comfort:
+    name: "Doel: comfort"
+    min: 0
+    max: 10
+    step: 1
+    initial: 8
+    mode: slider
+    icon: mdi:sofa
+
+  eos_goal_cost:
+    name: "Doel: kosten besparen"
+    min: 0
+    max: 10
+    step: 1
+    initial: 7
+    mode: slider
+    icon: mdi:cash
+
+  eos_goal_self_consumption:
+    name: "Doel: zelfverbruik"
+    min: 0
+    max: 10
+    step: 1
+    initial: 6
+    mode: slider
+    icon: mdi:home-lightning-bolt
+
+  eos_goal_lifetime:
+    name: "Doel: levensduur assets"
+    min: 0
+    max: 10
+    step: 1
+    initial: 5
+    mode: slider
+    icon: mdi:battery-heart-variant
+
+  eos_goal_grid_friendly:
+    name: "Doel: netvriendelijkheid"
+    min: 0
+    max: 10
+    step: 1
+    initial: 4
+    mode: slider
+    icon: mdi:transmission-tower
+
+# ─── Operationele drempels ─────────────────────────────────
+  eos_tariff_cheap:
+    name: "Tarief drempel goedkoop"
+    min: 0.00
+    max: 0.25
+    step: 0.01
+    unit_of_measurement: "€/kWh"
+    initial: 0.10
+    mode: box
+    icon: mdi:currency-eur
+
+  eos_tariff_expensive:
+    name: "Tarief drempel duur"
+    min: 0.15
+    max: 0.80
+    step: 0.01
+    unit_of_measurement: "€/kWh"
+    initial: 0.28
+    mode: box
+    icon: mdi:currency-eur
+
+  eos_tariff_cheap_fraction:
+    name: "Auto drempel: goedkoop (% van 24h uren)"
+    min: 10
+    max: 50
+    step: 5
+    unit_of_measurement: "%"
+    initial: 33
+    mode: slider
+    icon: mdi:arrow-down-bold-circle
+    # 33% = 8 van 24 uur zijn goedkoop (onderste derde)
+
+  eos_tariff_expensive_fraction:
+    name: "Auto drempel: duur (% van 24h uren)"
+    min: 10
+    max: 50
+    step: 5
+    unit_of_measurement: "%"
+    initial: 25
+    mode: slider
+    icon: mdi:arrow-up-bold-circle
+    # 25% = 6 van 24 uur zijn duur (bovenste kwart)
+
+  eos_grid_soft_limit_w:
+    name: "Grid soft limit"
+    min: 500
+    max: 8000
+    step: 100
+    unit_of_measurement: "W"
+    initial: 3500
+    mode: box
+
+  eos_grid_hard_limit_w:
+    name: "Grid hard limit"
+    min: 1000
+    max: 12000
+    step: 100
+    unit_of_measurement: "W"
+    initial: 5500
+    mode: box
+
+  eos_hp_cap_override:
+    name: "HP cap override (0..20)"
+    min: 0
+    max: 20
+    step: 1
+    initial: 20
+    mode: slider
+    icon: mdi:heat-pump-outline
+
+  eos_hp_min_cap_during_sell:
+    name: "HP cap tijdens 'Sell'"
+    min: 0
+    max: 20
+    step: 1
+    initial: 8
+    mode: slider
+
+  eos_hp_min_cap_during_charge:
+    name: "HP cap tijdens 'Charge'"
+    min: 0
+    max: 20
+    step: 1
+    initial: 6
+    mode: slider
+
+  eos_charge_target_soc:
+    name: "Charge: stop bij SoC (%)"
+    min: 10
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    initial: 100
+    mode: slider
+    icon: mdi:battery-charging
+
+  eos_charge_power_kw:
+    name: "Verwacht laadvermogen (kW)"
+    min: 1.0
+    max: 10.0
+    step: 0.5
+    unit_of_measurement: "kW"
+    initial: 6.0
+    mode: slider
+    icon: mdi:lightning-bolt
+    # 3× Marstek max 7.5 kW, maar taper bij hoge SoC/lage temp → 6.0 kW conservatief
+
+  eos_discharge_power_kw:
+    name: "Verwacht ontlaadvermogen (kW)"
+    min: 1.0
+    max: 10.0
+    step: 0.5
+    unit_of_measurement: "kW"
+    initial: 7.5
+    mode: slider
+    icon: mdi:lightning-bolt-outline
+    # 3× Marstek max 2500W ontladen = 7.5 kW (geen taper bij ontladen)
+
+  eos_sell_min_spread_eur:
+    name: "Verkoop: min spread voor Sell (€/kWh)"
+    min: 0.05
+    max: 0.60
+    step: 0.01
+    unit_of_measurement: "€/kWh"
+    initial: 0.30
+    mode: box
+    icon: mdi:delta
+    # Spread = gem. verkoopvenster − gem. laadvenster.
+    # Boven drempel → Sell. Eronder → Self-consumption (meter op 0).
+
+  eos_min_soc_for_eve_discharge:
+    name: "Min SoC voor avond-ontladen"
+    min: 5
+    max: 50
+    step: 5
+    unit_of_measurement: "%"
+    initial: 30
+    mode: slider
+
+# ─── Dynamic 2 — pair-matching instellingen ────────────────
+  eos_dynamic2_cheapest_hrs:
+    name: "Dynamic 2: goedkope uren per dag"
+    min: 0
+    max: 12
+    step: 0.5
+    unit_of_measurement: "h"
+    initial: 4
+    mode: slider
+    icon: mdi:arrow-down-bold-circle
+
+  eos_dynamic2_expensive_hrs:
+    name: "Dynamic 2: dure uren per dag"
+    min: 0
+    max: 12
+    step: 0.5
+    unit_of_measurement: "h"
+    initial: 4
+    mode: slider
+    icon: mdi:arrow-up-bold-circle
+
+  eos_dynamic2_min_delta_eur:
+    name: "Dynamic 2: min spread voor duur slot"
+    min: 0.00
+    max: 0.30
+    step: 0.01
+    unit_of_measurement: "€/kWh"
+    initial: 0.05
+    mode: box
+    icon: mdi:delta
+
+  eos_comfort_band_c:
+    name: "Comfort band (±°C)"
+    min: 0.2
+    max: 2.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    initial: 0.5
+    mode: slider
+
+# ─── DHW pre-heating ───────────────────────────────────────
+  eos_dhw_preheat_max_temp_c:
+    name: "DHW max temp voor voorverwarming"
+    min: 44
+    max: 58
+    step: 0.5
+    unit_of_measurement: "°C"
+    initial: 52
+    mode: slider
+    icon: mdi:thermometer-water
+    # Boven deze temp wordt geen solar boost geactiveerd
+
+  eos_dhw_solar_surplus_threshold_w:
+    name: "DHW boost: min solar surplus"
+    min: 100
+    max: 3000
+    step: 100
+    unit_of_measurement: "W"
+    initial: 500
+    mode: slider
+    icon: mdi:solar-power
+
+# ─── M13: Batterijgezondheid ───────────────────────────────
+  eos_battery_measured_capacity_kwh:
+    name: "Batterij gemeten capaciteit (laatste cyclus)"
+    min: 3.0
+    max: 18.0
+    step: 0.01
+    initial: 15.36
+    mode: box
+    unit_of_measurement: "kWh"
+    icon: mdi:battery-heart-variant
+    # Handmatig invullen na volle laad-ontlaadcyclus, of auto-ingevuld door SoH-automatie
+
+  eos_battery_soh_cycle_start_kwh:
+    name: "SoH cyclus: maand-discharge bij start (intern)"
+    min: 0
+    max: 100000
+    step: 0.001
+    initial: 0
+    mode: box
+    icon: mdi:counter
+
+# ─── Peak shave HP cap ─────────────────────────────────────
+  eos_hp_cap_during_peak:
+    name: "HP cap bij grid-piek"
+    min: 0
+    max: 20
+    step: 1
+    initial: 10
+    mode: slider
+    icon: mdi:transmission-tower
+
+# ─── M12B + M15: Timed schema tijden ──────────────────────
+input_datetime:
+  eos_timed_charge_start:
+    name: "Timed schema: laadstart"
+    has_date: false
+    has_time: true
+    icon: mdi:clock-start
+
+  eos_timed_charge_stop:
+    name: "Timed schema: laadstop"
+    has_date: false
+    has_time: true
+    icon: mdi:clock-end
+
+  eos_timed_sell_start:
+    name: "Verkoop schema: start"
+    has_date: false
+    has_time: true
+    icon: mdi:clock-start
+
+  eos_timed_sell_stop:
+    name: "Verkoop schema: stop"
+    has_date: false
+    has_time: true
+    icon: mdi:clock-end
+
+# ─── Profielen automation: zet meerdere sliders tegelijk ───
+automation:
+  - id: eos_apply_profile
+    alias: "EOS: Profiel toepassen"
+    trigger:
+      - platform: state
+        entity_id: input_select.energy_os_profile
+    condition:
+      - condition: template
+        value_template: "{{ trigger.to_state.state != 'Aangepast' }}"
+    action:
+      - choose:
+          - conditions: "{{ trigger.to_state.state == 'Werkdag' }}"
+            sequence:
+              - service: input_number.set_value
+                data: {value: 8}
+                target: {entity_id: input_number.eos_goal_comfort}
+              - service: input_number.set_value
+                data: {value: 7}
+                target: {entity_id: input_number.eos_goal_cost}
+              - service: input_number.set_value
+                data: {value: 6}
+                target: {entity_id: input_number.eos_goal_self_consumption}
+              - service: input_number.set_value
+                data: {value: 0.50}
+                target: {entity_id: input_number.eos_comfort_band_c}
+
+          - conditions: "{{ trigger.to_state.state == 'Weekend Thuis' }}"
+            sequence:
+              - service: input_number.set_value
+                data: {value: 9}
+                target: {entity_id: input_number.eos_goal_comfort}
+              - service: input_number.set_value
+                data: {value: 5}
+                target: {entity_id: input_number.eos_goal_cost}
+              - service: input_number.set_value
+                data: {value: 8}
+                target: {entity_id: input_number.eos_goal_self_consumption}
+              - service: input_number.set_value
+                data: {value: 0.30}
+                target: {entity_id: input_number.eos_comfort_band_c}
+
+          - conditions: "{{ trigger.to_state.state == 'Vakantie' }}"
+            sequence:
+              - service: input_number.set_value
+                data: {value: 3}
+                target: {entity_id: input_number.eos_goal_comfort}
+              - service: input_number.set_value
+                data: {value: 10}
+                target: {entity_id: input_number.eos_goal_cost}
+              - service: input_number.set_value
+                data: {value: 9}
+                target: {entity_id: input_number.eos_goal_self_consumption}
+              - service: input_number.set_value
+                data: {value: 1.50}
+                target: {entity_id: input_number.eos_comfort_band_c}
+
+          - conditions: "{{ trigger.to_state.state == 'Koude Piek' }}"
+            sequence:
+              - service: input_number.set_value
+                data: {value: 10}
+                target: {entity_id: input_number.eos_goal_comfort}
+              - service: input_number.set_value
+                data: {value: 2}
+                target: {entity_id: input_number.eos_goal_cost}
+              - service: input_number.set_value
+                data: {value: 3}
+                target: {entity_id: input_number.eos_goal_self_consumption}
+              - service: input_number.set_value
+                data: {value: 0.30}
+                target: {entity_id: input_number.eos_comfort_band_c}
+
+          - conditions: "{{ trigger.to_state.state == 'Zonnige Dag' }}"
+            sequence:
+              - service: input_number.set_value
+                data: {value: 7}
+                target: {entity_id: input_number.eos_goal_comfort}
+              - service: input_number.set_value
+                data: {value: 5}
+                target: {entity_id: input_number.eos_goal_cost}
+              - service: input_number.set_value
+                data: {value: 10}
+                target: {entity_id: input_number.eos_goal_self_consumption}
+              - service: input_number.set_value
+                data: {value: 0.80}
+                target: {entity_id: input_number.eos_comfort_band_c}

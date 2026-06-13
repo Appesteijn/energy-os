@@ -1,0 +1,551 @@
+# ============================================================
+# EnergyOS — Mijlpaal 1: Battery Driver
+# ============================================================
+# Doel: directe aansturing van de 3 Marstek-batterijen vanuit
+# de ESP, met handmatige test-UI. Geen strategie-logica nog —
+# alleen een veilige driver-laag en handbediening.
+#
+# Toevoegen aan de Marstek YAML door uit te breiden:
+#   packages:
+#     # ... marstek_m1, m2, m3 ...
+#     eos_battery_driver: !include eos_battery_driver.yaml
+#
+# ─── SAFETY ────────────────────────────────────────────────
+# - "EOS Driver Enable" staat default UIT (restart-veilig).
+#   Tot je hem AAN zet doet deze module NIETS — alle batterij-
+#   schrijfacties komen dan nog steeds van HA / Node-RED.
+# - "Force Stop All" werkt ook als de driver UIT staat
+#   (noodknop — schakelt RS485 control mode op alle 3 uit).
+# - Watchdog: als er > 60s geen versch commando binnen komt,
+#   schakelt de driver automatisch alle batterijen naar STOP.
+# - Per-batterij power limit: hard begrensd op 2500 W.
+#
+# ─── BELANGRIJK VÓÓR INSCHAKELEN ───────────────────────────
+# Zet EOS modus op "Full stop" in HA voordat je de driver
+# inschakelt. Node-RED is niet meer actief (Milestone 4+).
+# ============================================================
+
+substitutions:
+  eos_drv_max_per_batt_w: "2500"        # Hard limit per batterij
+  eos_drv_watchdog_s: "60"              # Watchdog timeout
+  eos_drv_loop_s: "5"                   # Hoofdloop interval
+
+# ─── Driver state ──────────────────────────────────────────
+globals:
+  - id: eos_drv_last_cmd_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  - id: eos_drv_applied_total_w
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: eos_drv_applied_m1_w
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: eos_drv_applied_m2_w
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: eos_drv_applied_m3_w
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: eos_drv_cmd_code
+    type: int
+    restore_value: false
+    initial_value: '0'   # 0=disabled, 1=idle, 2=stop, 3=charge, 4=discharge, 9=watchdog_stop, 99=emergency
+
+# ─── UI: enable, command, distribution, targets ───────────
+switch:
+  - platform: template
+    name: "EOS Driver Enable"
+    id: eos_drv_enable
+    icon: mdi:power-plug-battery
+    optimistic: true
+    restore_mode: ALWAYS_OFF       # SAFETY: altijd uit na reboot
+    entity_category: config
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 30
+
+select:
+  - platform: template
+    name: "EOS Driver Command"
+    id: eos_drv_command
+    icon: mdi:console-line
+    optimistic: true
+    restore_value: true
+    options:
+      - idle           # RS485 disable, laat Marstek's interne logica
+      - stop           # forcible=stop, RS485 enable
+      - charge         # forceer laden met target_charge_w
+      - discharge      # forceer ontladen met target_discharge_w
+      - emergency_stop # ALLES uit (RS485+forcible)
+    initial_option: idle
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 31
+
+  - platform: template
+    name: "EOS Driver Distribution"
+    id: eos_drv_distribution
+    icon: mdi:scale-balance
+    optimistic: true
+    restore_value: true
+    options:
+      - soc_aware         # laden: laagste SoC voorrang; ontladen: hoogste SoC voorrang
+      - equal             # P/3, maar SoC-limieten worden altijd gerespecteerd
+    initial_option: soc_aware
+    entity_category: config
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 32
+
+number:
+  - platform: template
+    name: "EOS Driver Target Charge"
+    id: eos_drv_target_charge_w
+    min_value: 0
+    max_value: 7500       # 3 × 2500
+    step: 50
+    initial_value: 0
+    optimistic: true
+    restore_value: false
+    mode: box
+    unit_of_measurement: "W"
+    icon: mdi:battery-arrow-up
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 33
+
+  - platform: template
+    name: "EOS Driver Target Discharge"
+    id: eos_drv_target_discharge_w
+    min_value: 0
+    max_value: 7500
+    step: 50
+    initial_value: 0
+    optimistic: true
+    restore_value: false
+    mode: box
+    unit_of_measurement: "W"
+    icon: mdi:battery-arrow-down
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 34
+
+button:
+  - platform: template
+    name: "EOS Force Stop All"
+    id: eos_drv_force_stop_btn
+    icon: mdi:stop-circle-outline
+    entity_category: config
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 35
+    on_press:
+      - lambda: |-
+          // Emergency stop — werkt altijd, ongeacht enable-switch
+          // Zet alle 3 batterijen direct in forcible=stop én RS485 disable.
+          {
+            auto c1 = id(m1_forcible_charge_discharge).make_call();
+            c1.set_option("stop"); c1.perform();
+            auto c2 = id(m2_forcible_charge_discharge).make_call();
+            c2.set_option("stop"); c2.perform();
+            auto c3 = id(m3_forcible_charge_discharge).make_call();
+            c3.set_option("stop"); c3.perform();
+          }
+          {
+            auto c1 = id(m1_rs485_control_mode).make_call();
+            c1.set_option("disable"); c1.perform();
+            auto c2 = id(m2_rs485_control_mode).make_call();
+            c2.set_option("disable"); c2.perform();
+            auto c3 = id(m3_rs485_control_mode).make_call();
+            c3.set_option("disable"); c3.perform();
+          }
+          id(eos_drv_cmd_code) = 99;
+          id(eos_drv_applied_total_w) = 0;
+          id(eos_drv_applied_m1_w) = 0;
+          id(eos_drv_applied_m2_w) = 0;
+          id(eos_drv_applied_m3_w) = 0;
+          id(eos_drv_state_text).publish_state("EMERGENCY STOP (handmatig)");
+          id(eos_drv_last_action).publish_state("Emergency stop");
+          ESP_LOGW("eos_drv", "Emergency stop triggered manually");
+
+  - platform: template
+    name: "EOS Test Charge 500W"
+    id: eos_drv_test_charge_btn
+    icon: mdi:battery-charging-50
+    entity_category: config
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 36
+    on_press:
+      - lambda: |-
+          // Test-knop: zet target en command in één klap.
+          // Werkt alleen als enable AAN staat (anders gebeurt niets).
+          auto t = id(eos_drv_target_charge_w).make_call();
+          t.set_value(500); t.perform();
+          auto c = id(eos_drv_command).make_call();
+          c.set_option("charge"); c.perform();
+
+  - platform: template
+    name: "EOS Test Discharge 500W"
+    id: eos_drv_test_discharge_btn
+    icon: mdi:battery-arrow-down-outline
+    entity_category: config
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 37
+    on_press:
+      - lambda: |-
+          auto t = id(eos_drv_target_discharge_w).make_call();
+          t.set_value(500); t.perform();
+          auto c = id(eos_drv_command).make_call();
+          c.set_option("discharge"); c.perform();
+
+# ─── Status uitvoer ────────────────────────────────────────
+text_sensor:
+  - platform: template
+    name: "EOS Driver State"
+    id: eos_drv_state_text
+    icon: mdi:state-machine
+    update_interval: never
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 50
+
+  - platform: template
+    name: "EOS Driver Last Action"
+    id: eos_drv_last_action
+    icon: mdi:history
+    update_interval: never
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 51
+
+sensor:
+  - platform: template
+    name: "EOS Driver Applied Total"
+    id: eos_drv_applied_total_sensor
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: ${eos_drv_loop_s}s
+    icon: mdi:flash
+    lambda: 'return (float) id(eos_drv_applied_total_w);'
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 52
+
+  - platform: template
+    name: "EOS Applied M1"
+    id: eos_drv_applied_m1_sensor
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    update_interval: ${eos_drv_loop_s}s
+    lambda: 'return (float) id(eos_drv_applied_m1_w);'
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 53
+
+  - platform: template
+    name: "EOS Applied M2"
+    id: eos_drv_applied_m2_sensor
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    update_interval: ${eos_drv_loop_s}s
+    lambda: 'return (float) id(eos_drv_applied_m2_w);'
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 54
+
+  - platform: template
+    name: "EOS Applied M3"
+    id: eos_drv_applied_m3_sensor
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    update_interval: ${eos_drv_loop_s}s
+    lambda: 'return (float) id(eos_drv_applied_m3_w);'
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 55
+
+# ─── Hoofdloop ─────────────────────────────────────────────
+interval:
+  - interval: ${eos_drv_loop_s}s
+    startup_delay: 30s     # wacht tot batterijen state hebben
+    then:
+      - lambda: |-
+          const uint32_t now_ms = millis();
+          const bool enabled = id(eos_drv_enable).state;
+          const std::string cmd = id(eos_drv_command).current_option();
+
+          // ──────────────────────────────────────────────
+          // Helpers: idempotent schrijven (alleen bij verschil)
+          // ──────────────────────────────────────────────
+          auto set_rs485 = [](esphome::select::Select* sel, const char* opt) {
+            if (sel == nullptr) return;
+            if (!sel->has_state() || sel->current_option() != std::string(opt)) {
+              auto c = sel->make_call();
+              c.set_option(opt);
+              c.perform();
+            }
+          };
+          auto set_forcible = [](esphome::select::Select* sel, const char* opt) {
+            if (sel == nullptr) return;
+            if (!sel->has_state() || sel->current_option() != std::string(opt)) {
+              auto c = sel->make_call();
+              c.set_option(opt);
+              c.perform();
+            }
+          };
+          auto set_work_mode = [](esphome::select::Select* sel, const char* opt) {
+            if (sel == nullptr) return;
+            if (!sel->has_state() || sel->current_option() != std::string(opt)) {
+              auto c = sel->make_call();
+              c.set_option(opt);
+              c.perform();
+            }
+          };
+          auto set_power = [](esphome::number::Number* num, int w) {
+            if (num == nullptr) return;
+            if (!num->has_state() || (int)num->state != w) {
+              auto c = num->make_call();
+              c.set_value((float)w);
+              c.perform();
+            }
+          };
+
+          // ──────────────────────────────────────────────
+          // 1) Driver UIT? → publiceer status, doe niets verder.
+          //    (we touch geen Modbus-registers, Node-RED is leidend)
+          // ──────────────────────────────────────────────
+          if (!enabled) {
+            id(eos_drv_cmd_code) = 0;
+            id(eos_drv_applied_total_w) = 0;
+            id(eos_drv_applied_m1_w) = 0;
+            id(eos_drv_applied_m2_w) = 0;
+            id(eos_drv_applied_m3_w) = 0;
+            id(eos_drv_state_text).publish_state(
+              "UIT — Node-RED / HA is leidend");
+            return;
+          }
+
+          // ──────────────────────────────────────────────
+          // 2) Watchdog: > N s zonder fresh command → STOP
+          // ──────────────────────────────────────────────
+          const uint32_t wd_ms = (uint32_t)${eos_drv_watchdog_s} * 1000UL;
+          const bool have_prior_cmd = (id(eos_drv_last_cmd_ms) > 0);
+          if (have_prior_cmd && (now_ms - id(eos_drv_last_cmd_ms)) > wd_ms) {
+            set_rs485(id(m1_rs485_control_mode), "enable");
+            set_rs485(id(m2_rs485_control_mode), "enable");
+            set_rs485(id(m3_rs485_control_mode), "enable");
+            set_work_mode(id(m1_user_work_mode), "anti-feed");
+            set_work_mode(id(m2_user_work_mode), "anti-feed");
+            set_work_mode(id(m3_user_work_mode), "anti-feed");
+            set_forcible(id(m1_forcible_charge_discharge), "charge");
+            set_forcible(id(m2_forcible_charge_discharge), "charge");
+            set_forcible(id(m3_forcible_charge_discharge), "charge");
+            set_power(id(m1_forcible_charge_power), 0);
+            set_power(id(m2_forcible_charge_power), 0);
+            set_power(id(m3_forcible_charge_power), 0);
+            id(eos_drv_cmd_code) = 9;
+            id(eos_drv_applied_total_w) = 0;
+            id(eos_drv_applied_m1_w) = 0;
+            id(eos_drv_applied_m2_w) = 0;
+            id(eos_drv_applied_m3_w) = 0;
+            id(eos_drv_state_text).publish_state("WATCHDOG STOP (power=0, anti-feed)");
+            return;
+          }
+
+          // ──────────────────────────────────────────────
+          // 3) Commando uitvoeren
+          // ──────────────────────────────────────────────
+          const int max_per_batt = (int)${eos_drv_max_per_batt_w};
+          int m1_w = 0, m2_w = 0, m3_w = 0;
+          int total_applied = 0;
+          int new_code = 1;
+          char action[120]; action[0] = '\0';
+
+          if (cmd == "emergency_stop") {
+            // Volledige uitschakeling
+            set_forcible(id(m1_forcible_charge_discharge), "stop");
+            set_forcible(id(m2_forcible_charge_discharge), "stop");
+            set_forcible(id(m3_forcible_charge_discharge), "stop");
+            set_rs485(id(m1_rs485_control_mode), "disable");
+            set_rs485(id(m2_rs485_control_mode), "disable");
+            set_rs485(id(m3_rs485_control_mode), "disable");
+            new_code = 99;
+            snprintf(action, sizeof(action), "EMERGENCY: alle batterijen uit");
+            id(eos_drv_state_text).publish_state("EMERGENCY STOP");
+
+          } else if (cmd == "idle" || cmd == "stop") {
+            // Anti-feed actief, power=0 — RS485 blijft aan
+            set_rs485(id(m1_rs485_control_mode), "enable");
+            set_rs485(id(m2_rs485_control_mode), "enable");
+            set_rs485(id(m3_rs485_control_mode), "enable");
+            set_work_mode(id(m1_user_work_mode), "anti-feed");
+            set_work_mode(id(m2_user_work_mode), "anti-feed");
+            set_work_mode(id(m3_user_work_mode), "anti-feed");
+            set_forcible(id(m1_forcible_charge_discharge), "charge");
+            set_forcible(id(m2_forcible_charge_discharge), "charge");
+            set_forcible(id(m3_forcible_charge_discharge), "charge");
+            set_power(id(m1_forcible_charge_power), 0);
+            set_power(id(m2_forcible_charge_power), 0);
+            set_power(id(m3_forcible_charge_power), 0);
+            new_code = (cmd == "stop") ? 2 : 1;
+            snprintf(action, sizeof(action), "%s: anti-feed power=0",
+                     cmd == "stop" ? "Stop" : "Idle");
+            id(eos_drv_state_text).publish_state(
+              cmd == "stop" ? "Stop (anti-feed, power=0)" : "Idle (anti-feed, power=0)");
+
+          } else if (cmd == "charge" || cmd == "discharge") {
+            const bool is_charge = (cmd == "charge");
+            const int total_w = is_charge
+                ? (int)id(eos_drv_target_charge_w).state
+                : (int)id(eos_drv_target_discharge_w).state;
+
+            // ── Distributie over 3 batterijen ─────────────────
+            // SoC per batterij (altijd nodig voor veiligheidslimieten)
+            float s1 = id(m1_battery_state_of_charge).has_state()
+                        ? id(m1_battery_state_of_charge).state : 50.0f;
+            float s2 = id(m2_battery_state_of_charge).has_state()
+                        ? id(m2_battery_state_of_charge).state : 50.0f;
+            float s3 = id(m3_battery_state_of_charge).has_state()
+                        ? id(m3_battery_state_of_charge).state : 50.0f;
+
+            // Per-batterij maximaal vermogen op basis van SoC
+            // Laden:    SoC>=99% → 0W (vol),  SoC>=95% → max 1500W (tapering)
+            // Ontladen: SoC<=soc_min → 0W (leeg)
+            float dis_floor = id(eos_ha_min_soc).has_state()
+                               ? id(eos_ha_min_soc).state : 15.0f;
+            int cap1, cap2, cap3;
+            if (is_charge) {
+              cap1 = (s1 >= 99.0f) ? 0 : (s1 >= 95.0f) ? std::min(max_per_batt, 1500) : max_per_batt;
+              cap2 = (s2 >= 99.0f) ? 0 : (s2 >= 95.0f) ? std::min(max_per_batt, 1500) : max_per_batt;
+              cap3 = (s3 >= 99.0f) ? 0 : (s3 >= 95.0f) ? std::min(max_per_batt, 1500) : max_per_batt;
+            } else {
+              cap1 = (s1 <= dis_floor) ? 0 : max_per_batt;
+              cap2 = (s2 <= dis_floor) ? 0 : max_per_batt;
+              cap3 = (s3 <= dis_floor) ? 0 : max_per_batt;
+            }
+
+            // Gewichten: soc_aware = headroom/depth; equal = gelijk gewicht
+            const std::string dmode = id(eos_drv_distribution).current_option();
+            float w1, w2, w3;
+            if (dmode == "soc_aware") {
+              w1 = is_charge ? std::max(0.0f, 100.0f - s1) : std::max(0.0f, s1 - dis_floor);
+              w2 = is_charge ? std::max(0.0f, 100.0f - s2) : std::max(0.0f, s2 - dis_floor);
+              w3 = is_charge ? std::max(0.0f, 100.0f - s3) : std::max(0.0f, s3 - dis_floor);
+            } else {
+              // equal — maar SoC-caps worden hieronder nog steeds toegepast
+              w1 = w2 = w3 = 1.0f;
+            }
+            float wsum = w1 + w2 + w3;
+
+            // Stap 1: proportioneel toewijzen, geclampd op per-batterij cap
+            if (wsum > 0.1f) {
+              m1_w = (int)std::min((float)total_w * w1 / wsum, (float)cap1);
+              m2_w = (int)std::min((float)total_w * w2 / wsum, (float)cap2);
+              m3_w = (int)std::min((float)total_w * w3 / wsum, (float)cap3);
+            } else {
+              m1_w = m2_w = m3_w = 0;
+            }
+
+            // Stap 2: niet-toegewezen vermogen redistribueren naar batterijen met ruimte
+            int unassigned = total_w - m1_w - m2_w - m3_w;
+            if (unassigned > 50) {
+              int room1 = std::max(0, cap1 - m1_w);
+              int room2 = std::max(0, cap2 - m2_w);
+              int room3 = std::max(0, cap3 - m3_w);
+              int rooms = room1 + room2 + room3;
+              if (rooms > 0) {
+                m1_w += unassigned * room1 / rooms;
+                m2_w += unassigned * room2 / rooms;
+                // Restant naar m3 (afrondingsverlies)
+                int m3_extra = unassigned - (unassigned * room1 / rooms)
+                                          - (unassigned * room2 / rooms);
+                m3_w = std::min(cap3, m3_w + m3_extra);
+              }
+            }
+
+            // Finale clip (veiligheid)
+            if (m1_w > cap1) m1_w = cap1;
+            if (m2_w > cap2) m2_w = cap2;
+            if (m3_w > cap3) m3_w = cap3;
+            if (m1_w < 0) m1_w = 0;
+            if (m2_w < 0) m2_w = 0;
+            if (m3_w < 0) m3_w = 0;
+
+            // Schrijf naar batterijen — RS485 aan, anti-feed, power regelt alles
+            set_rs485(id(m1_rs485_control_mode), "enable");
+            set_rs485(id(m2_rs485_control_mode), "enable");
+            set_rs485(id(m3_rs485_control_mode), "enable");
+            set_work_mode(id(m1_user_work_mode), "anti-feed");
+            set_work_mode(id(m2_user_work_mode), "anti-feed");
+            set_work_mode(id(m3_user_work_mode), "anti-feed");
+
+            const char* fopt = is_charge ? "charge" : "discharge";
+            set_forcible(id(m1_forcible_charge_discharge), fopt);
+            set_forcible(id(m2_forcible_charge_discharge), fopt);
+            set_forcible(id(m3_forcible_charge_discharge), fopt);
+
+            if (is_charge) {
+              set_power(id(m1_forcible_charge_power), m1_w);
+              set_power(id(m2_forcible_charge_power), m2_w);
+              set_power(id(m3_forcible_charge_power), m3_w);
+              set_power(id(m1_forcible_discharge_power), 0);
+              set_power(id(m2_forcible_discharge_power), 0);
+              set_power(id(m3_forcible_discharge_power), 0);
+            } else {
+              set_power(id(m1_forcible_discharge_power), m1_w);
+              set_power(id(m2_forcible_discharge_power), m2_w);
+              set_power(id(m3_forcible_discharge_power), m3_w);
+              set_power(id(m1_forcible_charge_power), 0);
+              set_power(id(m2_forcible_charge_power), 0);
+              set_power(id(m3_forcible_charge_power), 0);
+            }
+
+            total_applied = m1_w + m2_w + m3_w;
+            new_code = is_charge ? 3 : 4;
+            snprintf(action, sizeof(action),
+              "%s %dW (m1=%d@%.0f%% m2=%d@%.0f%% m3=%d@%.0f%%, %s)",
+              is_charge ? "Charge" : "Discharge",
+              total_applied,
+              m1_w, s1, m2_w, s2, m3_w, s3, dmode.c_str());
+            char state_buf[100];
+            snprintf(state_buf, sizeof(state_buf),
+              "%s %dW (m1:%d/%.0f%% m2:%d/%.0f%% m3:%d/%.0f%%)",
+              is_charge ? "Laden" : "Ontladen",
+              total_applied, m1_w, s1, m2_w, s2, m3_w, s3);
+            id(eos_drv_state_text).publish_state(state_buf);
+
+          } else {
+            // Onbekend commando — safe fallback
+            new_code = 0;
+            snprintf(action, sizeof(action), "Onbekend cmd: %s", cmd.c_str());
+            id(eos_drv_state_text).publish_state("Onbekend commando");
+          }
+
+          // ──────────────────────────────────────────────
+          // 4) State publiceren
+          // ──────────────────────────────────────────────
+          id(eos_drv_cmd_code) = new_code;
+          id(eos_drv_applied_m1_w) = m1_w;
+          id(eos_drv_applied_m2_w) = m2_w;
+          id(eos_drv_applied_m3_w) = m3_w;
+          id(eos_drv_applied_total_w) = total_applied;
+          id(eos_drv_last_cmd_ms) = now_ms;
+          if (action[0] != '\0') {
+            id(eos_drv_last_action).publish_state(action);
+          }

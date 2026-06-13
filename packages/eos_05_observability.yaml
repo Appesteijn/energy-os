@@ -1,0 +1,453 @@
+# ============================================================
+# EnergyOS — Laag 5 — OBSERVABILITY
+# ============================================================
+# Verklaarbaarheid + anomaliedetectie + alerts.
+#
+# Hoofdsensor: sensor.eos_why
+#   "In één zin: waarom doet EnergyOS wat het nu doet?"
+# ============================================================
+
+template:
+  - sensor:
+      # ─── "Waarom doet hij dit?" — één-zin verklaring ─────
+      - name: "eos_why"
+        unique_id: eos_why
+        state: >
+          {% if not is_state('input_boolean.energy_os_enabled', 'on') %}
+            EnergyOS is uitgeschakeld.
+          {% else %}
+            {{ states('input_text.eos_current_reason') }}
+          {% endif %}
+        icon: mdi:lightbulb-question
+
+      - name: "eos_what"
+        unique_id: eos_what
+        state: >
+          {% if not is_state('input_boolean.energy_os_enabled', 'on') %}
+            Uit
+          {% else %}
+            Modus: {{ states('input_select.energy_os_mode') }} ·
+            ESP: {{ states('sensor.schuur_marstek_3x_eos_strategy_active') }} ·
+            HP cap: {{ states('input_number.eos_hp_cap_override') }}
+          {% endif %}
+        icon: mdi:state-machine
+
+      # ─── Mismatch detectie ───────────────────────────────
+      - name: "eos_recommended_strategy"
+        unique_id: eos_recommended_strategy
+        state: >
+          {% set level = states('sensor.eos_tariff_level') %}
+          {% set soc = states('sensor.eos_battery_soc_estimate_pct') | float(50) %}
+          {% set soc_min = states('input_number.eos_min_soc_for_eve_discharge') | float(30) %}
+          {% set grid = states('sensor.eos_grid_power_w') | float(0) %}
+          {% set hard_lim = states('input_number.eos_grid_hard_limit_w') | float(5500) %}
+          {% set surplus = states('sensor.eos_solar_surplus_w') | float(0) %}
+          {% if grid > hard_lim %}Peak shave
+          {% elif level == 'goedkoop' and soc < 90 %}Charge
+          {% elif level == 'duur' and soc > (soc_min + 20) %}Sell
+          {% elif level == 'duur' %}Self-consumption
+          {% elif surplus > 200 %}Charge PV
+          {% else %}Self-consumption{% endif %}
+
+      # ─── KPI's vandaag ───────────────────────────────────
+      - name: "eos_kpi_self_consumption_pct"
+        unique_id: eos_kpi_self_consumption_pct
+        unit_of_measurement: "%"
+        state_class: measurement
+        state: >
+          {% set imp = states('sensor.eos_today_grid_import_kwh') | float(0) %}
+          {% set hp  = states('sensor.openquatt_electrical_energy_daily') | float(0) %}
+          {% set base_est = states('sensor.eos_today_base_load_kwh') | float(0) %}
+          {% set total = hp + base_est %}
+          {% if total > 0.1 %}
+            {% set pct = ((total - imp) / total * 100) | round(1) | float %}
+            {% set pct_lo = [pct, 0] | max %}
+            {% set pct_hi = [pct_lo, 100] | min %}
+            {{ pct_hi }}
+          {% else %}0{% endif %}
+
+      - name: "eos_today_grid_import_kwh"
+        unique_id: eos_today_grid_import_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: measurement
+        state: >
+          {{ states('sensor.eos_today_grid_import_meter') | float(0) }}
+
+      - name: "eos_today_grid_export_kwh"
+        unique_id: eos_today_grid_export_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: measurement
+        state: >
+          {{ states('sensor.eos_today_grid_export_meter') | float(0) }}
+
+      - name: "eos_today_battery_charge_kwh"
+        unique_id: eos_today_battery_charge_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: measurement
+        state: "{{ states('sensor.eos_today_battery_charge_meter') | float(0) | round(2) }}"
+        icon: mdi:battery-arrow-down-outline
+
+      - name: "eos_today_battery_discharge_kwh"
+        unique_id: eos_today_battery_discharge_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: measurement
+        state: "{{ states('sensor.eos_today_battery_discharge_meter') | float(0) | round(2) }}"
+        icon: mdi:battery-arrow-up-outline
+
+      # ─── Dagelijkse euro-balance ─────────────────────────
+      - name: "eos_today_grid_import_cost_eur"
+        unique_id: eos_today_grid_import_cost_eur
+        unit_of_measurement: "€"
+        state_class: measurement
+        icon: mdi:cash-minus
+        state: "{{ states('sensor.eos_today_grid_import_cost_meter') | float(0) | round(3) }}"
+
+      - name: "eos_today_grid_export_revenue_eur"
+        unique_id: eos_today_grid_export_revenue_eur
+        unit_of_measurement: "€"
+        state_class: measurement
+        icon: mdi:cash-plus
+        state: "{{ states('sensor.eos_today_grid_export_revenue_meter') | float(0) | round(3) }}"
+
+      - name: "eos_today_net_energy_cost_eur"
+        unique_id: eos_today_net_energy_cost_eur
+        unit_of_measurement: "€"
+        state_class: measurement
+        icon: mdi:scale-balance
+        state: >
+          {% set cost = states('sensor.eos_today_grid_import_cost_eur') | float(0) %}
+          {% set rev  = states('sensor.eos_today_grid_export_revenue_eur') | float(0) %}
+          {{ (cost - rev) | round(3) }}
+
+      # ─── Maandelijkse KPI's ──────────────────────────────
+      - name: "eos_month_grid_import_kwh"
+        unique_id: eos_month_grid_import_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: "{{ states('sensor.eos_month_grid_import_kwh_meter') | float(0) | round(2) }}"
+        icon: mdi:transmission-tower-import
+
+      - name: "eos_month_grid_export_kwh"
+        unique_id: eos_month_grid_export_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: "{{ states('sensor.eos_month_grid_export_kwh_meter') | float(0) | round(2) }}"
+        icon: mdi:transmission-tower-export
+
+      - name: "eos_month_battery_charge_kwh"
+        unique_id: eos_month_battery_charge_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: "{{ states('sensor.eos_month_battery_charge_kwh_meter') | float(0) | round(2) }}"
+        icon: mdi:battery-arrow-down-outline
+
+      - name: "eos_month_battery_discharge_kwh"
+        unique_id: eos_month_battery_discharge_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: "{{ states('sensor.eos_month_battery_discharge_kwh_meter') | float(0) | round(2) }}"
+        icon: mdi:battery-arrow-up-outline
+
+      - name: "eos_month_grid_import_cost_eur"
+        unique_id: eos_month_grid_import_cost_eur
+        unit_of_measurement: "€"
+        state_class: total_increasing
+        icon: mdi:cash-minus
+        state: "{{ states('sensor.eos_month_grid_import_cost_meter') | float(0) | round(2) }}"
+
+      - name: "eos_month_grid_export_revenue_eur"
+        unique_id: eos_month_grid_export_revenue_eur
+        unit_of_measurement: "€"
+        state_class: total_increasing
+        icon: mdi:cash-plus
+        state: "{{ states('sensor.eos_month_grid_export_revenue_meter') | float(0) | round(2) }}"
+
+      - name: "eos_month_net_energy_cost_eur"
+        unique_id: eos_month_net_energy_cost_eur
+        unit_of_measurement: "€"
+        state_class: measurement
+        icon: mdi:scale-balance
+        state: >
+          {% set cost = states('sensor.eos_month_grid_import_cost_eur') | float(0) %}
+          {% set rev  = states('sensor.eos_month_grid_export_revenue_eur') | float(0) %}
+          {{ (cost - rev) | round(2) }}
+
+      - name: "eos_today_base_load_kwh"
+        unique_id: eos_today_base_load_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: "{{ states('input_number.eos_counter_base_load_kwh') | float(0) | round(2) }}"
+
+      # ─── M14: Dagelijkse energie-stroom sensoren ──────────
+      - name: "eos_today_solar_kwh"
+        unique_id: eos_today_solar_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: "{{ states('sensor.eos_today_solar_production_meter') | float(0) | round(2) }}"
+        icon: mdi:solar-power
+
+      - name: "eos_month_solar_kwh"
+        unique_id: eos_month_solar_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: "{{ states('sensor.eos_month_solar_production_meter') | float(0) | round(2) }}"
+        icon: mdi:solar-power
+
+      # Huis verbruik vandaag = zon + import + ontladen − export − laden
+      - name: "eos_today_house_consumption_kwh"
+        unique_id: eos_today_house_consumption_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:home-lightning-bolt
+        state: >
+          {% set solar   = states('sensor.eos_today_solar_kwh') | float(0) %}
+          {% set imp     = states('sensor.eos_today_grid_import_kwh') | float(0) %}
+          {% set exp     = states('sensor.eos_today_grid_export_kwh') | float(0) %}
+          {% set chg     = states('sensor.eos_today_battery_charge_kwh') | float(0) %}
+          {% set dis     = states('sensor.eos_today_battery_discharge_kwh') | float(0) %}
+          {{ [solar + imp + dis - exp - chg, 0] | max | round(2) }}
+
+      # ─── M13: Batterijgezondheid ─────────────────────────
+      - name: "eos_battery_health_estimate_pct"
+        unique_id: eos_battery_health_estimate_pct
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:battery-heart-variant
+        state: >
+          {% set measured = states('input_number.eos_battery_measured_capacity_kwh') | float(15.36) %}
+          {{ (measured / 15.36 * 100) | round(1) }}
+
+      - name: "eos_battery_equiv_full_cycles_month"
+        unique_id: eos_battery_equiv_full_cycles_month
+        unit_of_measurement: "cycli"
+        state_class: measurement
+        icon: mdi:battery-sync
+        state: >
+          {% set dis = states('sensor.eos_month_battery_discharge_kwh') | float(0) %}
+          {{ (dis / 15.36) | round(1) }}
+
+      # ─── Arbitrage besparingen vandaag ───────────────────
+      # Schatting: werkelijke batterijomzet × verschil goedkoopste/duurste venster.
+      # Formule: ontladen_kwh × duur_prijs - geladen_kwh × goedkoop_prijs
+      # Gebruikt de forecast-gebaseerde venstergemiddelden als proxy.
+      - name: "eos_arbitrage_savings_today_eur"
+        unique_id: eos_arbitrage_savings_today_eur
+        unit_of_measurement: "€"
+        state_class: measurement
+        icon: mdi:currency-eur
+        state: >
+          {% set discharge = states('sensor.eos_today_battery_discharge_kwh') | float(0) %}
+          {% set charge    = states('sensor.eos_today_battery_charge_kwh') | float(0) %}
+          {% set hi        = states('sensor.eos_plan_expensive_window_avg_price') | float(0) %}
+          {% set lo        = states('sensor.eos_plan_cheapest_window_avg_price') | float(0) %}
+          {# Valt terug op huidig tarief als forecast niet beschikbaar #}
+          {% set tariff    = states('sensor.eos_tariff_eur_kwh') | float(0.20) %}
+          {% set hi_p      = hi if hi > 0 else tariff %}
+          {% set lo_p      = lo if lo > 0 else tariff %}
+          {{ ((discharge * hi_p) - (charge * lo_p)) | round(2) }}
+
+      # ─── Setpoint vs actueel vergelijking ────────────────
+      # Strategy target signed: positief = batterij ontlaadt (geeft af),
+      # negatief = batterij laadt (neemt op). Komt overeen met
+      # eos_battery_power_w (HA convention).
+      - name: "eos_strategy_target_signed_w"
+        unique_id: eos_strategy_target_signed_w
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set cmd = states('select.schuur_marstek_3x_eos_driver_command') %}
+          {% set target = states('sensor.schuur_marstek_3x_eos_strategy_target') | float(0) %}
+          {% if cmd == 'discharge' %}{{ target | round(0) }}
+          {% elif cmd == 'charge' %}{{ (-target) | round(0) }}
+          {% else %}0
+          {% endif %}
+        icon: mdi:eye-arrow-right
+
+      # Afwijking tussen ESP-strategy setpoint en gemeten batterijvermogen
+      - name: "eos_shadow_diff_w"
+        unique_id: eos_shadow_diff_w
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set target = states('sensor.eos_strategy_target_signed_w') | float(0) %}
+          {% set actual = states('sensor.eos_battery_power_w') | float(0) %}
+          {{ (target - actual) | round(0) }}
+        icon: mdi:approximately-equal
+
+      # Tekstuele uitleg (ESP actief — vergelijkt setpoint met gemeten vermogen)
+      - name: "eos_shadow_compare_text"
+        unique_id: eos_shadow_compare_text
+        state: >
+          {% set target = states('sensor.eos_strategy_target_signed_w') | float(0) %}
+          {% set actual = states('sensor.eos_battery_power_w') | float(0) %}
+          {% set diff = (target - actual) | round(0) %}
+          {% set strat = states('sensor.schuur_marstek_3x_eos_strategy_active') %}
+          ESP ({{ strat }}) setpoint {{ target | int }}W,
+          gemeten {{ actual | int }}W → afwijking {{ diff | int }}W
+        icon: mdi:scale-balance
+
+  # ─── Anomalie-baselines (longterm trends) ───────────────
+  - binary_sensor:
+      - name: "eos_anomaly_hp_high_power"
+        unique_id: eos_anomaly_hp_high_power
+        state: >
+          {% set p = states('sensor.eos_hp_power_w') | float(0) %}
+          {{ p > 4000 }}
+        icon: mdi:alert-circle-outline
+
+      - name: "eos_anomaly_grid_export_spike"
+        unique_id: eos_anomaly_grid_export_spike
+        state: "{{ states('sensor.eos_grid_power_w') | float(0) < -6000 }}"
+
+      - name: "eos_anomaly_battery_idle_when_useful"
+        unique_id: eos_anomaly_battery_idle_when_useful
+        # Batterij doet niets terwijl er een duidelijke kans is
+        state: >
+          {% set bp = states('sensor.eos_battery_power_w') | float(0) | abs %}
+          {% set surplus = states('sensor.eos_solar_surplus_w') | float(0) %}
+          {% set level = states('sensor.eos_tariff_level') %}
+          {% set soc = states('sensor.eos_battery_soc_estimate_pct') | float(50) %}
+          {% set opportunity = (surplus > 500 and soc < 95) or (level == 'duur' and soc > 40) %}
+          {{ opportunity and bp < 100 }}
+        icon: mdi:battery-question
+
+      - name: "eos_strategy_mismatch"
+        unique_id: eos_strategy_mismatch
+        state: >
+          {# Mismatch: ESP-active strategy wijkt af van wat de modus verwacht.
+             Dynamic resolveert naar sub-mode op basis van tarief. #}
+          {% set mode = states('input_select.energy_os_mode') %}
+          {% set esp_active = states('sensor.schuur_marstek_3x_eos_strategy_active') %}
+          {% set level = states('sensor.eos_tariff_level') %}
+          {% if mode in ['Handmatig', 'Timed'] %}false
+          {% elif mode == 'Dynamic' or mode == 'Dynamic 2' %}
+            {% set sell_on_exp = is_state('input_boolean.eos_dynamic_sell_on_expensive', 'on') %}
+            {% set expected = 'dynamic_charge' if level == 'goedkoop'
+                         else ('dynamic_sell' if sell_on_exp else 'dynamic_sc') if level == 'duur'
+                         else 'dynamic_chargepv' %}
+            {{ esp_active != expected }}
+          {% elif mode == 'Full stop' %}{{ esp_active != 'full_stop' }}
+          {% elif mode == 'Charge PV' %}{{ esp_active != 'charge_pv' }}
+          {% elif mode == 'Self-consumption' %}{{ esp_active not in ['self_consumption', 'peak_shave_auto'] }}
+          {% elif mode == 'Charge' %}{{ esp_active != 'charge' }}
+          {% elif mode == 'Sell' %}{{ esp_active != 'sell' }}
+          {% elif mode == 'Peak shave' %}{{ esp_active not in ['peak_shave', 'peak_shave_auto'] }}
+          {% else %}false{% endif %}
+
+# ─── Tellers voor KPI's ─────────────────────────────────────
+input_number:
+  eos_counter_base_load_kwh:
+    name: "EOS Teller: basisbelasting kWh"
+    min: 0
+    max: 1000
+    step: 0.01
+    initial: 0
+    mode: box
+
+# ─── Integraal voor basisbelasting (continu integreren) ────
+# (niet actief gebruikt — eos_today_base_load_kwh leest input_number.eos_counter_base_load_kwh)
+
+# ─── Anomalie alert automation ─────────────────────────────
+automation:
+  - id: eos_anomaly_alert
+    alias: "EOS: Alert bij anomalie"
+    trigger:
+      - platform: state
+        entity_id:
+          - binary_sensor.eos_anomaly_hp_high_power
+          - binary_sensor.eos_anomaly_battery_idle_when_useful
+        to: "on"
+        for: "00:05:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.energy_os_anomaly_detection
+        state: "on"
+    action:
+      - service: persistent_notification.create
+        data:
+          title: "EnergyOS anomalie"
+          message: >
+            Anomalie gedetecteerd: {{ trigger.entity_id }}
+            Reden: {{ states('input_text.eos_current_reason') }}
+            Tijd: {{ now().strftime('%H:%M') }}
+          notification_id: "eos_anomaly_{{ trigger.entity_id.split('.')[1] }}"
+
+  # Reset dagelijkse base-load teller bij middernacht
+  - id: eos_daily_reset
+    alias: "EOS: Reset dagelijkse tellers"
+    trigger:
+      - platform: time
+        at: "00:00:01"
+    action:
+      - service: input_number.set_value
+        target: {entity_id: input_number.eos_counter_base_load_kwh}
+        data: {value: 0}
+
+  # ── M13: SoH cyclus start — batterij bijna vol ───────────
+  - id: eos_soh_cycle_start
+    alias: "EOS: SoH meting — cyclus start (SoC > 97%)"
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.eos_battery_soc_estimate_pct
+        above: 97
+    condition:
+      - condition: state
+        entity_id: input_boolean.eos_battery_soh_cycle_active
+        state: "off"
+    action:
+      - service: input_boolean.turn_on
+        target: {entity_id: input_boolean.eos_battery_soh_cycle_active}
+      - service: input_number.set_value
+        target: {entity_id: input_number.eos_battery_soh_cycle_start_kwh}
+        data:
+          value: "{{ states('sensor.eos_month_battery_discharge_kwh') | float(0) }}"
+
+  # ── M13: SoH cyclus einde — batterij bijna leeg ──────────
+  - id: eos_soh_cycle_end
+    alias: "EOS: SoH meting — cyclus einde (SoC < 20%)"
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.eos_battery_soc_estimate_pct
+        below: 20
+    condition:
+      - condition: state
+        entity_id: input_boolean.eos_battery_soh_cycle_active
+        state: "on"
+    action:
+      - variables:
+          measured: >
+            {{ (states('sensor.eos_month_battery_discharge_kwh') | float(0))
+               - (states('input_number.eos_battery_soh_cycle_start_kwh') | float(0)) }}
+          soh_pct: >
+            {{ (((states('sensor.eos_month_battery_discharge_kwh') | float(0))
+                 - (states('input_number.eos_battery_soh_cycle_start_kwh') | float(0)))
+                / 15.36 * 100) | round(1) }}
+      - condition: template
+        value_template: "{{ measured | float(0) > 5 }}"
+      - service: input_number.set_value
+        target: {entity_id: input_number.eos_battery_measured_capacity_kwh}
+        data: {value: "{{ measured | round(2) }}"}
+      - service: input_boolean.turn_off
+        target: {entity_id: input_boolean.eos_battery_soh_cycle_active}
+      - service: persistent_notification.create
+        data:
+          title: "EOS: Batterijcapaciteit gemeten"
+          message: >
+            Cyclus voltooid.
+            Gemeten capaciteit: {{ measured | round(2) }} kWh
+            (nominaal 15.36 kWh → SoH {{ soh_pct }}%).
+          notification_id: "eos_soh_measurement"

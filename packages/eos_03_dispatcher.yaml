@@ -1,0 +1,620 @@
+# ============================================================
+# EnergyOS — Laag 3 — DISPATCHER (v2 — ESP-native)
+# ============================================================
+# Batterijsturing is volledig overgenomen door de ESP
+# (eos_strategies.yaml + eos_battery_driver.yaml via RS485).
+#
+# De dispatcher doet nog twee dingen:
+#   1) HP-cap coördineren op basis van modus + tarief
+#   2) Reden + beslissingscode schrijven voor verklaarbaarheid
+#
+# De script.eos_set_battery_strategy (Node-RED aanroep) vervalt.
+# ============================================================
+
+script:
+  eos_apply_hp_cap:
+    alias: "EOS: Stel HP cap in"
+    fields:
+      cap_level:
+        description: "Cap niveau 0-20"
+        example: 10
+    sequence:
+      - variables:
+          desired: "{{ [[cap_level | int(20), 0] | max, 20] | min }}"
+          current: "{{ states('input_number.eos_hp_cap_override') | int(20) }}"
+      - if:
+          - condition: template
+            value_template: "{{ desired != current }}"
+        then:
+          - service: input_number.set_value
+            target: {entity_id: input_number.eos_hp_cap_override}
+            data: {value: "{{ desired }}"}
+          - service: input_text.set_value
+            target: {entity_id: input_text.eos_last_action}
+            data:
+              value: >
+                {{ now().strftime('%H:%M') }} HP cap {{ current }} → {{ desired }}
+      # Optionele ESPHome brug (uncomment na flashen oq_energy_os_bridge.yaml):
+      # - service: number.set_value
+      #   target: {entity_id: number.openquatt_eos_hp_cap_ha}
+      #   data: {value: "{{ desired }}"}
+
+# State voor verklaarbaarheid (Laag 5 leest dit uit)
+input_text:
+  eos_last_action:
+    name: "EOS Laatste actie"
+    max: 200
+    initial: "geen"
+    icon: mdi:history
+
+  eos_current_reason:
+    name: "EOS Huidige reden"
+    max: 200
+    initial: "init"
+    icon: mdi:lightbulb-question
+
+  eos_current_decision_code:
+    name: "EOS Beslissingscode"
+    max: 50
+    initial: "init"
+
+automation:
+  - id: eos_main_dispatcher
+    alias: "EOS: Hoofd dispatcher (1 min)"
+    trigger:
+      - platform: time_pattern
+        minutes: "/1"
+    condition:
+      - condition: state
+        entity_id: input_boolean.energy_os_enabled
+        state: "on"
+    action:
+      - variables:
+          mode_sel:   "{{ states('input_select.energy_os_mode') }}"
+          level:      "{{ states('sensor.eos_tariff_level') }}"
+          soc:        "{{ states('sensor.eos_battery_soc_estimate_pct') | float(50) }}"
+          soc_min:    "{{ states('input_number.eos_min_soc_for_eve_discharge') | float(30) }}"
+          grid:       "{{ states('sensor.eos_grid_power_w') | float(0) }}"
+          hard_lim:   "{{ states('input_number.eos_grid_hard_limit_w') | float(5500) }}"
+          bat_low:    "{{ is_state('binary_sensor.eos_asset_battery_low', 'on') }}"
+          hp_full:    20
+          hp_charge:  "{{ states('input_number.eos_hp_min_cap_during_charge') | int(6) }}"
+          hp_sell:    "{{ states('input_number.eos_hp_min_cap_during_sell') | int(8) }}"
+          hp_peak:    "{{ states('input_number.eos_hp_cap_during_peak') | int(10) }}"
+
+      - choose:
+          # ── HANDMATIG / TIMED ─────────────────────────────
+          # ESP is gedelegeerd — EOS grijpt niet in op HP
+          - conditions: "{{ mode_sel in ['Handmatig', 'Timed'] }}"
+            sequence:
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_reason}
+                data: {value: "{{ mode_sel }} — EOS grijpt niet in"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_decision_code}
+                data: {value: "DELEGATE"}
+
+          # ── FULL STOP ─────────────────────────────────────
+          - conditions: "{{ mode_sel == 'Full stop' }}"
+            sequence:
+              - service: script.eos_apply_hp_cap
+                data: {cap_level: "{{ hp_full }}"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_reason}
+                data: {value: "Full stop — HP vrij"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_decision_code}
+                data: {value: "FULL_STOP"}
+
+          # ── CHARGE PV ─────────────────────────────────────
+          # PI naar 0W, discharge geblokkeerd. HP vrij.
+          - conditions: "{{ mode_sel == 'Charge PV' }}"
+            sequence:
+              - service: script.eos_apply_hp_cap
+                data: {cap_level: "{{ hp_full }}"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_reason}
+                data: {value: "Charge PV — zonnestroom, HP vrij"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_decision_code}
+                data: {value: "CHARGE_PV"}
+
+          # ── SELF-CONSUMPTION ──────────────────────────────
+          - conditions: "{{ mode_sel == 'Self-consumption' }}"
+            sequence:
+              - service: script.eos_apply_hp_cap
+                data: {cap_level: "{{ hp_full }}"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_reason}
+                data: {value: "Self-consumption — nul op de meter, HP vrij"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_decision_code}
+                data: {value: "SELF_CONSUMPTION"}
+
+          # ── CHARGE ────────────────────────────────────────
+          # ESP laadt op max. HP getrotteld (batterij en HP concurreren op grid).
+          - conditions: "{{ mode_sel == 'Charge' }}"
+            sequence:
+              - service: script.eos_apply_hp_cap
+                data: {cap_level: "{{ hp_charge }}"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_reason}
+                data: {value: "Charge — max laden, HP throttle {{ hp_charge }}"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_decision_code}
+                data: {value: "CHARGE"}
+
+          # ── SELL ──────────────────────────────────────────
+          - conditions: "{{ mode_sel == 'Sell' }}"
+            sequence:
+              - service: script.eos_apply_hp_cap
+                data: {cap_level: "{{ hp_sell }}"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_reason}
+                data: {value: "Sell — ontladen, HP throttle {{ hp_sell }}"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_decision_code}
+                data: {value: "SELL"}
+
+          # ── PEAK SHAVE ────────────────────────────────────
+          # Selecteerbare modus (automatische overlay zit in ESP)
+          - conditions: "{{ mode_sel == 'Peak shave' }}"
+            sequence:
+              - service: script.eos_apply_hp_cap
+                data: {cap_level: "{{ hp_peak }}"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_reason}
+                data: {value: "Peak shave — grid {{ grid | int }}W, HP {{ hp_peak }}"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_decision_code}
+                data: {value: "PEAK_SHAVE"}
+
+          # ── DYNAMIC / DYNAMIC 2 ───────────────────────────
+          # ESP regelt batterij op basis van tarief.
+          # HP-coördinatie hier op basis van tarief_level.
+          - conditions: "{{ mode_sel in ['Dynamic', 'Dynamic 2'] }}"
+            sequence:
+              - if:
+                  - condition: state
+                    entity_id: input_boolean.energy_os_hp_coordination
+                    state: "on"
+                then:
+                  - variables:
+                      desired_cap: >
+                        {% if grid > hard_lim %}{{ hp_peak }}
+                        {% elif level == 'duur' and not bat_low %}{{ hp_sell }}
+                        {% elif level == 'goedkoop' %}{{ hp_charge }}
+                        {% else %}{{ hp_full }}{% endif %}
+                      reason_text: >
+                        {% if grid > hard_lim %}Grid {{ grid | int }}W boven limit → HP throttle
+                        {% elif level == 'duur' and not bat_low %}Tarief duur, ESP ontlaadt → HP throttle {{ hp_sell }}
+                        {% elif level == 'goedkoop' %}Tarief goedkoop, ESP laadt → HP throttle {{ hp_charge }}
+                        {% else %}Tarief normaal → HP vrij{% endif %}
+                  - service: script.eos_apply_hp_cap
+                    data: {cap_level: "{{ desired_cap }}"}
+                  - service: input_text.set_value
+                    target: {entity_id: input_text.eos_current_reason}
+                    data: {value: "{{ mode_sel }}: {{ reason_text }}"}
+                else:
+                  - service: script.eos_apply_hp_cap
+                    data: {cap_level: "{{ hp_full }}"}
+                  - service: input_text.set_value
+                    target: {entity_id: input_text.eos_current_reason}
+                    data: {value: "{{ mode_sel }} — HP coördinatie uit"}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_current_decision_code}
+                data: {value: "{{ 'DYNAMIC_2' if mode_sel == 'Dynamic 2' else 'DYNAMIC' }}"}
+
+        default:
+          - service: input_text.set_value
+            target: {entity_id: input_text.eos_current_reason}
+            data: {value: "Onbekende modus: {{ mode_sel }}"}
+          - service: input_text.set_value
+            target: {entity_id: input_text.eos_current_decision_code}
+            data: {value: "UNKNOWN"}
+
+  # ── DHW SOLAR BOOST AAN ──────────────────────────────────
+  - id: eos_dhw_boost_aan
+    alias: "EOS: DHW solar boost AAN bij pre-heat kans"
+    trigger:
+      - platform: state
+        entity_id: sensor.eos_dhw_preheat_opportunity
+        not_to: "geen"
+    condition:
+      - condition: state
+        entity_id: input_boolean.energy_os_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.energy_os_hp_coordination
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.eos_dhw_solar_boost_enabled
+        state: "on"
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: sensor.eos_dhw_preheat_opportunity
+            state: "geen"
+    action:
+      - service: input_boolean.turn_on
+        target: {entity_id: input_boolean.eos_dhw_solar_boost_active}
+      - service: input_text.set_value
+        target: {entity_id: input_text.eos_last_action}
+        data:
+          value: >
+            {{ now().strftime('%H:%M') }} DHW boost AAN
+            (reden: {{ states('sensor.eos_dhw_preheat_opportunity') }},
+            DHW: {{ states('sensor.eos_dhw_top_c') }}°C)
+
+  # ── DHW SOLAR BOOST UIT ───────────────────────────────────
+  # Reden: kans vervallen (geen goedkoop tarief meer, DHW vol, of duur tarief)
+  - id: eos_dhw_boost_uit
+    alias: "EOS: DHW solar boost UIT — kans vervallen"
+    trigger:
+      - platform: state
+        entity_id: sensor.eos_dhw_preheat_opportunity
+        to: "geen"
+    condition:
+      - condition: state
+        entity_id: input_boolean.eos_dhw_solar_boost_active
+        state: "on"
+    action:
+      - service: input_boolean.turn_off
+        target: {entity_id: input_boolean.eos_dhw_solar_boost_active}
+      - service: input_text.set_value
+        target: {entity_id: input_text.eos_last_action}
+        data:
+          value: >
+            {{ now().strftime('%H:%M') }} DHW boost UIT
+            (tarief: {{ states('sensor.eos_tariff_level') }},
+            DHW: {{ states('sensor.eos_dhw_top_c') }}°C)
+
+  # ── CHARGE DOEL BEREIKT ───────────────────────────────────
+  - id: eos_charge_goal_reached
+    alias: "EOS: Charge doel bereikt → switch modus"
+    description: >
+      Schakel over naar geconfigureerde modus zodra Charge SoC-doel bereikt.
+      Twee triggers: SoC kruist drempel, of modus wisselt naar Charge terwijl SoC al boven doel.
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.eos_battery_soc_estimate_pct
+        above: input_number.eos_charge_target_soc
+      - platform: state
+        entity_id: input_select.energy_os_mode
+        to: "Charge"
+    condition:
+      - condition: state
+        entity_id: input_select.energy_os_mode
+        state: "Charge"
+      - condition: numeric_state
+        entity_id: sensor.eos_battery_soc_estimate_pct
+        above: input_number.eos_charge_target_soc
+      - condition: state
+        entity_id: input_boolean.energy_os_enabled
+        state: "on"
+    action:
+      - variables:
+          new_mode: "{{ states('input_select.eos_charge_goal_reached') }}"
+          soc_now: "{{ states('sensor.eos_battery_soc_estimate_pct') | int }}"
+      - service: input_select.select_option
+        target: {entity_id: input_select.energy_os_mode}
+        data: {option: "{{ new_mode }}"}
+      - service: input_text.set_value
+        target: {entity_id: input_text.eos_last_action}
+        data:
+          value: "{{ now().strftime('%H:%M') }} Charge doel bereikt (SoC {{ soc_now }}%) → {{ new_mode }}"
+
+  # ── SELL DOEL BEREIKT ─────────────────────────────────────
+  - id: eos_sell_goal_reached
+    alias: "EOS: Sell doel bereikt → switch modus"
+    description: >
+      Schakel over naar geconfigureerde modus zodra Sell SoC-vloer bereikt.
+      Twee triggers: SoC kruist drempel, of modus wisselt naar Sell terwijl SoC al onder vloer.
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.eos_battery_soc_estimate_pct
+        below: input_number.eos_min_soc_for_eve_discharge
+      - platform: state
+        entity_id: input_select.energy_os_mode
+        to: "Sell"
+    condition:
+      - condition: state
+        entity_id: input_select.energy_os_mode
+        state: "Sell"
+      - condition: numeric_state
+        entity_id: sensor.eos_battery_soc_estimate_pct
+        below: input_number.eos_min_soc_for_eve_discharge
+      - condition: state
+        entity_id: input_boolean.energy_os_enabled
+        state: "on"
+    action:
+      - variables:
+          new_mode: "{{ states('input_select.eos_sell_goal_reached') }}"
+          soc_now: "{{ states('sensor.eos_battery_soc_estimate_pct') | int }}"
+      - service: input_select.select_option
+        target: {entity_id: input_select.energy_os_mode}
+        data: {option: "{{ new_mode }}"}
+      - service: input_text.set_value
+        target: {entity_id: input_text.eos_last_action}
+        data:
+          value: "{{ now().strftime('%H:%M') }} Sell doel bereikt (SoC {{ soc_now }}%) → {{ new_mode }}"
+
+  # ── M12A: Sell window alert ───────────────────────────────
+  - id: eos_sell_window_alert
+    alias: "EOS: Alert — duur venster nadert"
+    description: >
+      Notificatie als een duur tarief-venster binnen 30 min begint,
+      SoC hoog genoeg is om te verkopen, maar de modus niet al op
+      Dynamic/Dynamic 2/Sell staat.
+    trigger:
+      - platform: time_pattern
+        minutes: "/5"
+    condition:
+      - condition: state
+        entity_id: input_boolean.energy_os_enabled
+        state: "on"
+      - condition: template
+        value_template: >
+          {% set ws = states('sensor.eos_plan_expensive_window_start') %}
+          {% if ws in ['unknown', 'unavailable', 'none'] %}false
+          {% else %}
+            {% set mins = ((as_timestamp(ws) - as_timestamp(now())) / 60) | int %}
+            {{ mins > 0 and mins <= 30 }}
+          {% endif %}
+      - condition: template
+        value_template: >
+          {{ states('input_select.energy_os_mode')
+             not in ['Dynamic', 'Dynamic 2', 'Sell'] }}
+      - condition: numeric_state
+        entity_id: sensor.eos_battery_soc_estimate_pct
+        above: input_number.eos_min_soc_for_eve_discharge
+    action:
+      - service: persistent_notification.create
+        data:
+          title: "EOS: Duur venster nadert"
+          message: >
+            Duur tarief-venster start over
+            {{ ((as_timestamp(states('sensor.eos_plan_expensive_window_start'))
+                 - as_timestamp(now())) / 60) | int }} minuten
+            ({{ as_timestamp(states('sensor.eos_plan_expensive_window_start'))
+                | timestamp_custom('%H:%M') }},
+            gem. {{ states('sensor.eos_plan_expensive_window_avg_price') }} €/kWh).
+            SoC: {{ states('sensor.eos_battery_soc_estimate_pct') | int }}%.
+            Modus nu: {{ states('input_select.energy_os_mode') }}.
+          notification_id: "eos_sell_window_alert"
+
+  - id: eos_sell_window_alert_dismiss
+    alias: "EOS: Dismiss sell window alert bij juiste modus"
+    trigger:
+      - platform: state
+        entity_id: input_select.energy_os_mode
+        to:
+          - Dynamic
+          - "Dynamic 2"
+          - Sell
+    action:
+      - service: persistent_notification.dismiss
+        data: {notification_id: "eos_sell_window_alert"}
+
+  # ── M12B: Timed schema ────────────────────────────────────
+  - id: eos_timed_schema_start
+    alias: "EOS: Timed schema — laadstart"
+    trigger:
+      - platform: time
+        at: input_datetime.eos_timed_charge_start
+    condition:
+      - condition: state
+        entity_id: input_boolean.eos_timed_schedule_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.energy_os_enabled
+        state: "on"
+    action:
+      - service: input_select.select_option
+        target: {entity_id: input_select.energy_os_mode}
+        data: {option: "Charge"}
+      - service: input_text.set_value
+        target: {entity_id: input_text.eos_last_action}
+        data:
+          value: >
+            {{ now().strftime('%H:%M') }} Timed schema: Charge gestart
+            (doel SoC {{ states('input_number.eos_charge_target_soc') | int }}%)
+
+  - id: eos_timed_schema_stop
+    alias: "EOS: Timed schema — laadstop"
+    trigger:
+      - platform: time
+        at: input_datetime.eos_timed_charge_stop
+    condition:
+      - condition: state
+        entity_id: input_boolean.eos_timed_schedule_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.energy_os_enabled
+        state: "on"
+    action:
+      - variables:
+          next_mode: "{{ states('input_select.eos_timed_after_charge_mode') }}"
+      - service: input_select.select_option
+        target: {entity_id: input_select.energy_os_mode}
+        data: {option: "{{ next_mode }}"}
+      - service: input_text.set_value
+        target: {entity_id: input_text.eos_last_action}
+        data:
+          value: >
+            {{ now().strftime('%H:%M') }} Timed schema: laadstop
+            → {{ next_mode }} (SoC {{ states('sensor.eos_battery_soc_estimate_pct') | int }}%)
+
+  # ── M15: Optimaal laadschema automatisch bijwerken ───────
+  # Loopt elke 30 min + bij SoC-wijziging + bij forecast-update.
+  # Berekent het goedkoopste N-uurs laadvenster en schrijft dit
+  # naar het M12B timed schema.
+  - id: eos_optimal_charge_schedule_update
+    alias: "EOS: Optimaal laadschema — tijden bijwerken"
+    trigger:
+      - platform: time_pattern
+        minutes: "/30"
+      - platform: state
+        entity_id: sensor.zonneplan_current_electricity_tariff
+      - platform: state
+        entity_id: sensor.eos_battery_soc_estimate_pct
+        for: "00:05:00"
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: input_boolean.eos_optimal_charge_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.energy_os_enabled
+        state: "on"
+      - condition: template
+        value_template: >
+          {{ states('sensor.eos_optimal_charge_hours_needed') | float(0) > 0.1 }}
+      - condition: template
+        value_template: >
+          {{ states('sensor.eos_optimal_charge_window_start') not in ['onbekend', 'unavailable', 'unknown', ''] }}
+    action:
+      - variables:
+          start_time: "{{ states('sensor.eos_optimal_charge_window_start') ~ ':00' }}"
+          stop_time:  "{{ states('sensor.eos_optimal_charge_window_stop') ~ ':00' }}"
+          avg_price:  "{{ states('sensor.eos_optimal_charge_window_avg_price') }}"
+          hours:      "{{ states('sensor.eos_optimal_charge_hours_needed') | float(0) | round(1) }}"
+      - service: input_datetime.set_datetime
+        target: {entity_id: input_datetime.eos_timed_charge_start}
+        data: {time: "{{ start_time }}"}
+      - service: input_datetime.set_datetime
+        target: {entity_id: input_datetime.eos_timed_charge_stop}
+        data: {time: "{{ stop_time }}"}
+      - service: input_boolean.turn_on
+        target: {entity_id: input_boolean.eos_timed_schedule_enabled}
+      - service: input_text.set_value
+        target: {entity_id: input_text.eos_last_action}
+        data:
+          value: >
+            {{ now().strftime('%H:%M') }} Optimaal laden gepland:
+            {{ start_time[:5] }}–{{ stop_time[:5] }}
+            ({{ hours }}u, gem. {{ avg_price }} €/kWh)
+
+  # ── M15: Optimaal verkoopschema automatisch bijwerken ────
+  - id: eos_optimal_sell_schedule_update
+    alias: "EOS: Optimaal verkoopschema — tijden bijwerken"
+    trigger:
+      - platform: time_pattern
+        minutes: "/30"
+      - platform: state
+        entity_id: sensor.zonneplan_current_electricity_tariff
+      - platform: state
+        entity_id: sensor.eos_battery_soc_estimate_pct
+        for: "00:05:00"
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: input_boolean.eos_optimal_sell_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.energy_os_enabled
+        state: "on"
+    # Geen hours/window checks hier — de default-branch moet altijd bereikbaar
+    # zijn zodat hij terug naar Self-consumption kan schakelen als spread te klein is.
+    action:
+      - variables:
+          start_time: "{{ states('sensor.eos_optimal_sell_window_start') ~ ':00' }}"
+          stop_time:  "{{ states('sensor.eos_optimal_sell_window_stop') ~ ':00' }}"
+          avg_price:  "{{ states('sensor.eos_optimal_sell_window_avg_price') | float(0) }}"
+          hours:      "{{ states('sensor.eos_optimal_sell_hours_available') | float(0) | round(1) }}"
+          spread:     "{{ states('sensor.eos_sell_spread_eur') | float(0) }}"
+          min_delta:  "{{ states('input_number.eos_sell_min_spread_eur') | float(0.30) }}"
+          window_ok:  >
+            {{ states('sensor.eos_optimal_sell_window_start')
+               not in ['onbekend', 'unavailable', 'unknown', ''] }}
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ spread >= min_delta and hours > 0.1 and window_ok }}"
+            sequence:
+              - service: input_datetime.set_datetime
+                target: {entity_id: input_datetime.eos_timed_sell_start}
+                data: {time: "{{ start_time }}"}
+              - service: input_datetime.set_datetime
+                target: {entity_id: input_datetime.eos_timed_sell_stop}
+                data: {time: "{{ stop_time }}"}
+              - service: input_boolean.turn_on
+                target: {entity_id: input_boolean.eos_timed_sell_enabled}
+              - service: input_text.set_value
+                target: {entity_id: input_text.eos_last_action}
+                data:
+                  value: >
+                    {{ now().strftime('%H:%M') }} Verkoop gepland:
+                    {{ start_time[:5] }}–{{ stop_time[:5] }}
+                    (spread {{ spread | round(3) }} €/kWh ≥ delta {{ min_delta }} €/kWh)
+        default:
+          - service: input_boolean.turn_off
+            target: {entity_id: input_boolean.eos_timed_sell_enabled}
+          - if:
+              - condition: state
+                entity_id: input_select.energy_os_mode
+                state: "Sell"
+            then:
+              - service: input_select.select_option
+                target: {entity_id: input_select.energy_os_mode}
+                data: {option: "Self-consumption"}
+          - service: input_text.set_value
+            target: {entity_id: input_text.eos_last_action}
+            data:
+              value: >
+                {{ now().strftime('%H:%M') }} Geen verkoop: spread
+                {{ spread | round(3) }} €/kWh < delta {{ min_delta }} €/kWh
+                → Self-consumption
+
+  # ── M15: Timed verkoopschema — start ────────────────────
+  - id: eos_timed_sell_start
+    alias: "EOS: Verkoop schema — start"
+    trigger:
+      - platform: time
+        at: input_datetime.eos_timed_sell_start
+    condition:
+      - condition: state
+        entity_id: input_boolean.eos_timed_sell_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.energy_os_enabled
+        state: "on"
+    action:
+      - service: input_select.select_option
+        target: {entity_id: input_select.energy_os_mode}
+        data: {option: "Sell"}
+      - service: input_text.set_value
+        target: {entity_id: input_text.eos_last_action}
+        data:
+          value: >
+            {{ now().strftime('%H:%M') }} Verkoop schema: Sell gestart
+            (SoC {{ states('sensor.eos_battery_soc_estimate_pct') | int }}%,
+            tarief {{ states('sensor.eos_tariff_eur_kwh') }} €/kWh)
+
+  # ── M15: Timed verkoopschema — stop ─────────────────────
+  - id: eos_timed_sell_stop
+    alias: "EOS: Verkoop schema — stop"
+    trigger:
+      - platform: time
+        at: input_datetime.eos_timed_sell_stop
+    condition:
+      - condition: state
+        entity_id: input_boolean.eos_timed_sell_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.energy_os_enabled
+        state: "on"
+    action:
+      - variables:
+          next_mode: "{{ states('input_select.eos_timed_after_sell_mode') }}"
+      - service: input_select.select_option
+        target: {entity_id: input_select.energy_os_mode}
+        data: {option: "{{ next_mode }}"}
+      - service: input_text.set_value
+        target: {entity_id: input_text.eos_last_action}
+        data:
+          value: >
+            {{ now().strftime('%H:%M') }} Verkoop schema: stop
+            → {{ next_mode }} (SoC {{ states('sensor.eos_battery_soc_estimate_pct') | int }}%)

@@ -1,0 +1,792 @@
+# ============================================================
+# EnergyOS — Dashboard (v4 — ESP-native, Milestone 5)
+# ============================================================
+# Te plakken in: Instellingen → Dashboards → Nieuw dashboard
+#                → ⋮ → Raw configuratie-editor
+# ============================================================
+title: Energy OS
+views:
+  # ─── VIEW 1: NU ───────────────────────────────────────────
+  - title: NU
+    path: eos-nu
+    icon: mdi:flash
+    cards:
+      - type: markdown
+        content: |
+          ## ⚡ {{ states('sensor.eos_what') }}
+          **Waarom:** {{ states('sensor.eos_why') }}
+
+      # ── Energiestromen ──────────────────────────────────
+      - type: glance
+        title: "Energiestromen (W)"
+        columns: 5
+        entities:
+          - entity: sensor.eos_solar_power_w
+            name: Zon
+          - entity: sensor.eos_grid_power_w
+            name: Net
+          - entity: sensor.eos_battery_power_w
+            name: Batt totaal
+          - entity: sensor.eos_battery_soc_estimate_pct
+            name: SoC gem
+          - entity: sensor.eos_hp_power_w
+            name: WP
+
+      # ── Per-batterij status ─────────────────────────────
+      - type: entities
+        title: "Batterijen M1 / M2 / M3"
+        show_header_toggle: false
+        entities:
+          - type: section
+            label: "M1"
+          - entity: sensor.marstek_3x_m1_battery_state_of_charge
+            name: "M1 SoC"
+            icon: mdi:battery
+          - entity: sensor.marstek_3x_m1_battery_power
+            name: "M1 Vermogen"
+            icon: mdi:flash
+          - entity: sensor.schuur_marstek_3x_eos_applied_m1
+            name: "M1 Driver setpoint"
+            icon: mdi:target
+          - entity: sensor.marstek_3x_m1_min_cell_temperature
+            name: "M1 Min celtemp"
+            icon: mdi:thermometer
+          - type: section
+            label: "M2"
+          - entity: sensor.marstek_3x_m2_battery_state_of_charge
+            name: "M2 SoC"
+            icon: mdi:battery
+          - entity: sensor.marstek_3x_m2_battery_power
+            name: "M2 Vermogen"
+            icon: mdi:flash
+          - entity: sensor.schuur_marstek_3x_eos_applied_m2
+            name: "M2 Driver setpoint"
+            icon: mdi:target
+          - entity: sensor.marstek_3x_m2_min_cell_temperature
+            name: "M2 Min celtemp"
+            icon: mdi:thermometer
+          - type: section
+            label: "M3"
+          - entity: sensor.marstek_3x_m3_battery_state_of_charge
+            name: "M3 SoC"
+            icon: mdi:battery
+          - entity: sensor.marstek_3x_m3_battery_power
+            name: "M3 Vermogen"
+            icon: mdi:flash
+          - entity: sensor.schuur_marstek_3x_eos_applied_m3
+            name: "M3 Driver setpoint"
+            icon: mdi:target
+          - entity: sensor.marstek_3x_m3_min_cell_temperature
+            name: "M3 Min celtemp"
+            icon: mdi:thermometer
+          - type: section
+            label: "Totaal"
+          - entity: sensor.schuur_marstek_3x_eos_driver_applied_total
+            name: "Driver totaal"
+            icon: mdi:sigma
+
+      - type: history-graph
+        title: "Batterij SoC per eenheid (4 uur)"
+        hours_to_show: 4
+        entities:
+          - entity: sensor.marstek_3x_m1_battery_state_of_charge
+            name: M1
+          - entity: sensor.marstek_3x_m2_battery_state_of_charge
+            name: M2
+          - entity: sensor.marstek_3x_m3_battery_state_of_charge
+            name: M3
+
+      - type: history-graph
+        title: "Batterij vermogen per eenheid (4 uur)"
+        hours_to_show: 4
+        entities:
+          - entity: sensor.marstek_3x_m1_battery_power
+            name: M1
+          - entity: sensor.marstek_3x_m2_battery_power
+            name: M2
+          - entity: sensor.marstek_3x_m3_battery_power
+            name: M3
+          - entity: sensor.eos_grid_power_w
+            name: Net
+
+      # ── Beheer + doel-instellingen ──────────────────────
+      - type: entities
+        title: "Beheer"
+        entities:
+          - entity: input_boolean.energy_os_enabled
+            name: "EnergyOS Actief"
+          - entity: input_select.energy_os_mode
+            name: "Modus"
+          - entity: input_number.eos_charge_target_soc
+            name: "Charge: stop bij SoC"
+          - entity: input_select.eos_charge_goal_reached
+            name: "Charge: na vol →"
+          - entity: input_select.eos_sell_goal_reached
+            name: "Sell: na leeg →"
+          - entity: input_select.energy_os_profile
+            name: "Profiel"
+          - entity: input_boolean.eos_dynamic_sell_on_expensive
+            name: "Dynamic: verkoop bij duur"
+          - entity: input_boolean.eos_peak_shave_in_manual
+            name: "Peak shave in Handmatig/Timed"
+          - entity: input_boolean.eos_dhw_solar_boost_enabled
+            name: "DHW solar boost: toestaan"
+          - entity: input_boolean.eos_ev_protection_enabled
+            name: "EV beveiliging (blokkeer laden)"
+          - entity: binary_sensor.eos_ev_charging
+            name: "Auto aan de lader"
+            icon: mdi:ev-station
+          - entity: input_boolean.energy_os_hp_coordination
+            name: "WP coördinatie"
+          - entity: input_boolean.energy_os_planner_enabled
+            name: "Planner"
+          - entity: input_boolean.energy_os_anomaly_detection
+            name: "Anomalie detectie"
+
+      # ── ESP-strategy status ─────────────────────────────
+      - type: entities
+        title: "ESP Strategy"
+        entities:
+          - entity: sensor.schuur_marstek_3x_eos_strategy_active
+            name: "Actieve strategie"
+          - entity: sensor.schuur_marstek_3x_eos_strategy_decision
+            name: "Reden"
+          - entity: sensor.schuur_marstek_3x_eos_strategy_shadow_log
+            name: "Setpoint log"
+          - entity: sensor.schuur_marstek_3x_eos_strategy_target
+            name: "Target (W)"
+          - entity: select.schuur_marstek_3x_eos_driver_command
+            name: "Driver command"
+          - entity: switch.schuur_marstek_3x_eos_strategies_active
+            name: "Strategies actief"
+          - entity: switch.schuur_marstek_3x_eos_driver_enable
+            name: "Driver enable"
+
+      # ── PI controller ───────────────────────────────────
+      - type: entities
+        title: "PI Controller"
+        entities:
+          - entity: number.schuur_marstek_3x_eos_pid_kp
+            name: "Kp"
+          - entity: number.schuur_marstek_3x_eos_pid_ki
+            name: "Ki"
+          - entity: switch.schuur_marstek_3x_eos_pid_autotune
+            name: "Autotune"
+          - entity: sensor.schuur_marstek_3x_eos_autotune_status
+            name: "Autotune status"
+
+      # ── Status ──────────────────────────────────────────
+      - type: entities
+        title: "Status"
+        entities:
+          - entity: sensor.eos_why
+            name: "Reden"
+          - entity: input_text.eos_current_decision_code
+            name: "Beslissingscode"
+          - entity: input_text.eos_last_action
+            name: "Laatste actie"
+          - entity: sensor.eos_recommended_strategy
+            name: "Aanbevolen strategie"
+          - entity: binary_sensor.eos_strategy_mismatch
+            name: "Mismatch ESP ↔ modus"
+          - entity: sensor.eos_tariff_eur_kwh
+            name: "Tarief nu"
+          - entity: sensor.eos_tariff_level
+            name: "Tariefniveau"
+          - entity: sensor.eos_dynamic2_period_type
+            name: "Dynamic 2 periode"
+          - entity: sensor.eos_solar_surplus_w
+            name: "Solar surplus"
+          - entity: binary_sensor.eos_grid_over_soft
+            name: "Grid > soft"
+          - entity: binary_sensor.eos_grid_over_hard
+            name: "Grid > hard"
+
+      # ── HA connectivity (supervisor) ────────────────────
+      - type: entities
+        title: "ESP Verbinding"
+        entities:
+          - entity: binary_sensor.schuur_marstek_3x_eos_ha_alive
+            name: "HA alive"
+          - entity: binary_sensor.schuur_marstek_3x_p1_direct_bereikbaar
+            name: "P1 direct bereikbaar"
+          - entity: sensor.schuur_marstek_3x_p1_direct_netto_vermogen
+            name: "P1 direct (W)"
+          - entity: binary_sensor.schuur_marstek_3x_eos_safe_mode_actief
+            name: "Safe mode"
+
+      # ── Asset capabilities ──────────────────────────────
+      - type: entities
+        title: "Asset capaciteiten"
+        entities:
+          - entity: sensor.eos_asset_battery_can_charge_w
+            name: "Batterij kan laden"
+          - entity: sensor.eos_asset_battery_can_discharge_w
+            name: "Batterij kan ontladen"
+          - entity: sensor.eos_asset_battery_energy_to_full_kwh
+            name: "Naar vol"
+          - entity: sensor.eos_asset_battery_energy_to_min_kwh
+            name: "Beschikbaar"
+          - entity: sensor.eos_asset_hp_running
+            name: "WP draait"
+          - entity: sensor.eos_asset_dhw_temp_c
+            name: "DHW temp"
+          - entity: sensor.eos_asset_dhw_needs_heating
+            name: "DHW vraag"
+
+  # ─── VIEW 2: VANDAAG ──────────────────────────────────────
+  - title: VANDAAG
+    path: eos-vandaag
+    icon: mdi:calendar-today
+    cards:
+      - type: markdown
+        content: |
+          ## 📅 24h Plan
+          {{ states('sensor.eos_plan_summary') }}
+
+      # ── Laadplanning status ─────────────────────────────
+      - type: markdown
+        content: >
+          {% set optimal_aan = is_state('input_boolean.eos_optimal_charge_enabled', 'on') %}
+          {% set schema_aan  = is_state('input_boolean.eos_timed_schedule_enabled', 'on') %}
+          {% set start_str   = states('input_datetime.eos_timed_charge_start') %}
+          {% set stop_str    = states('input_datetime.eos_timed_charge_stop') %}
+          {% set soc         = states('sensor.eos_battery_soc_estimate_pct') | float(0) %}
+          {% set target      = states('input_number.eos_charge_target_soc') | float(100) %}
+          {% set hours       = states('sensor.eos_optimal_charge_hours_needed') | float(0) %}
+          {% set avg_price   = states('sensor.eos_optimal_charge_window_avg_price') | float(0) %}
+          {% set mode        = states('input_select.energy_os_mode') %}
+
+          {% if start_str not in ['unknown', 'unavailable', ''] and schema_aan %}
+            {% set now_ts   = as_timestamp(now()) | int %}
+            {% set today    = now().strftime('%Y-%m-%d') %}
+            {% set start_ts = as_timestamp(today ~ ' ' ~ start_str) | int %}
+            {% set stop_ts  = as_timestamp(today ~ ' ' ~ stop_str) | int %}
+            {% if stop_ts < start_ts %}{% set stop_ts = stop_ts + 86400 %}{% endif %}
+
+            {% if now_ts >= start_ts and now_ts < stop_ts %}
+              {% set mins_left = ((stop_ts - now_ts) / 60) | int %}
+              ## 🔋 Batterij laadt nu
+              **Stop:** {{ stop_str[:5] }} — nog **{{ mins_left }} min**
+              **SoC:** {{ soc | round(0) }}% → {{ target | int }}%  &nbsp;|&nbsp; Tarief: {{ states('sensor.eos_tariff_eur_kwh') }} €/kWh
+            {% elif now_ts < start_ts %}
+              {% set mins_until = ((start_ts - now_ts) / 60) | int %}
+              {% set hrs_until  = (mins_until / 60) | int %}
+              {% set min_rest   = mins_until % 60 %}
+              ## ⏳ Laden gepland
+              **Start:** {{ start_str[:5] }}  &nbsp;→&nbsp;  **Stop:** {{ stop_str[:5] }}
+              Nog **{% if hrs_until > 0 %}{{ hrs_until }}u {% endif %}{{ min_rest }}min** tot laden begint
+              **Nodig:** {{ hours | round(1) }}u &nbsp;|&nbsp; **Gem. prijs:** {{ avg_price | round(3) }} €/kWh
+              {% if optimal_aan %}*(automatisch gepland)*{% endif %}
+            {% else %}
+              ## ✅ Laadvenster voorbij
+              **SoC:** {{ soc | round(0) }}%  &nbsp;|&nbsp;  **Modus:** {{ mode }}
+              {% if optimal_aan %}Volgende planning bij eerstvolgende update (elke 30 min).{% endif %}
+            {% endif %}
+          {% elif not schema_aan and optimal_aan %}
+            ## ⚙️ Optimaal laden: berekening loopt...
+            **Benodigde tijd:** {{ hours | round(1) }}u
+            **Goedkoopste venster:** {{ states('sensor.eos_optimal_charge_window_start') }} – {{ states('sensor.eos_optimal_charge_window_stop') }}
+            **Gem. prijs:** {{ avg_price | round(3) }} €/kWh
+          {% else %}
+            ## 💤 Geen laadplanning actief
+            Zet *Optimaal laden* aan in TUNING, of stel handmatig tijden in.
+            **SoC:** {{ soc | round(0) }}%  &nbsp;|&nbsp;  **Modus:** {{ mode }}
+          {% endif %}
+
+      # ── Ontlaadplanning status ──────────────────────────
+      - type: markdown
+        content: >
+          {% set optimal_aan = is_state('input_boolean.eos_optimal_sell_enabled', 'on') %}
+          {% set schema_aan  = is_state('input_boolean.eos_timed_sell_enabled', 'on') %}
+          {% set start_str   = states('input_datetime.eos_timed_sell_start') %}
+          {% set stop_str    = states('input_datetime.eos_timed_sell_stop') %}
+          {% set soc         = states('sensor.eos_battery_soc_estimate_pct') | float(0) %}
+          {% set floor       = states('input_number.eos_min_soc_for_eve_discharge') | float(30) %}
+          {% set hours       = states('sensor.eos_optimal_sell_hours_available') | float(0) %}
+          {% set avg_price   = states('sensor.eos_optimal_sell_window_avg_price') | float(0) %}
+          {% set spread      = states('sensor.eos_sell_spread_eur') | float(0) %}
+          {% set min_delta   = states('input_number.eos_sell_min_spread_eur') | float(0.30) %}
+          {% set beslissing  = states('sensor.eos_sell_decision') %}
+          {% set mode        = states('input_select.energy_os_mode') %}
+
+          {% if optimal_aan and beslissing == 'zelfverbruik' %}
+            ## 📊 Spread te klein — zelfverbruik
+            Spread **{{ spread | round(3) }}** €/kWh &lt; delta **{{ min_delta }}** €/kWh
+            Batterij houdt meter op 0 (Self-consumption).
+          {% elif start_str not in ['unknown', 'unavailable', ''] and schema_aan %}
+            {% set now_ts   = as_timestamp(now()) | int %}
+            {% set today    = now().strftime('%Y-%m-%d') %}
+            {% set start_ts = as_timestamp(today ~ ' ' ~ start_str) | int %}
+            {% set stop_ts  = as_timestamp(today ~ ' ' ~ stop_str) | int %}
+            {% if stop_ts < start_ts %}{% set stop_ts = stop_ts + 86400 %}{% endif %}
+
+            {% if now_ts >= start_ts and now_ts < stop_ts %}
+              {% set mins_left = ((stop_ts - now_ts) / 60) | int %}
+              ## ⚡ Batterij verkoopt nu
+              **Stop:** {{ stop_str[:5] }} — nog **{{ mins_left }} min**
+              **SoC:** {{ soc | round(0) }}% (vloer {{ floor | int }}%)  &nbsp;|&nbsp; Tarief: {{ states('sensor.eos_tariff_eur_kwh') }} €/kWh
+              Spread: **{{ spread | round(3) }}** €/kWh (≥ delta {{ min_delta }} €/kWh ✓)
+            {% elif now_ts < start_ts %}
+              {% set mins_until = ((start_ts - now_ts) / 60) | int %}
+              {% set hrs_until  = (mins_until / 60) | int %}
+              {% set min_rest   = mins_until % 60 %}
+              ## ⏳ Ontladen gepland
+              **Start:** {{ start_str[:5] }}  &nbsp;→&nbsp;  **Stop:** {{ stop_str[:5] }}
+              Nog **{% if hrs_until > 0 %}{{ hrs_until }}u {% endif %}{{ min_rest }}min** tot ontladen begint
+              **Beschikbaar:** {{ hours | round(1) }}u &nbsp;|&nbsp; **Gem. prijs:** {{ avg_price | round(3) }} €/kWh
+              Spread: **{{ spread | round(3) }}** €/kWh (≥ delta {{ min_delta }} €/kWh ✓)
+            {% else %}
+              ## ✅ Verkoopvenster voorbij
+              **SoC:** {{ soc | round(0) }}%  &nbsp;|&nbsp;  **Modus:** {{ mode }}
+              {% if optimal_aan %}Volgende planning bij eerstvolgende update (elke 30 min).{% endif %}
+            {% endif %}
+          {% elif not schema_aan and optimal_aan %}
+            ## ⚙️ Optimaal ontladen: berekening loopt...
+            **Beschikbare tijd:** {{ hours | round(1) }}u
+            **Duurste venster:** {{ states('sensor.eos_optimal_sell_window_start') }} – {{ states('sensor.eos_optimal_sell_window_stop') }}
+            Spread: {{ spread | round(3) }} €/kWh vs delta {{ min_delta }} €/kWh
+          {% else %}
+            ## 💤 Geen verkoopplanning actief
+            Zet *Optimaal ontladen* aan in TUNING, of stel handmatig tijden in.
+            **SoC:** {{ soc | round(0) }}%  &nbsp;|&nbsp;  **Modus:** {{ mode }}
+          {% endif %}
+
+      # ── Planner + tarief ────────────────────────────────
+      - type: entities
+        title: "Planner"
+        entities:
+          - entity: sensor.eos_plan_cheapest_window_start
+            name: "Goedkoopste 3u start"
+          - entity: sensor.eos_plan_cheapest_window_avg_price
+            name: "Gem. prijs goedkoop"
+          - entity: sensor.eos_plan_expensive_window_start
+            name: "Duurste 3u start"
+          - entity: sensor.eos_plan_expensive_window_avg_price
+            name: "Gem. prijs duur"
+          - entity: sensor.eos_plan_price_spread_eur_kwh
+            name: "Spread"
+          - entity: sensor.eos_plan_arbitrage_savings_eur
+            name: "Max. arbitrage (forecast)"
+          - entity: sensor.eos_plan_recommended_action_next_hour
+            name: "Volgend uur"
+          - entity: sensor.eos_dynamic2_period_type
+            name: "Dynamic 2 huidig uur"
+            icon: mdi:clock-time-eight-outline
+
+      # ── Dynamic 2 config ────────────────────────────────
+      - type: entities
+        title: "Dynamic 2 pair-matching"
+        show_header_toggle: false
+        entities:
+          - entity: input_number.eos_dynamic2_cheapest_hrs
+            name: "Goedkope uren per dag"
+          - entity: input_number.eos_dynamic2_expensive_hrs
+            name: "Dure uren per dag"
+          - entity: input_number.eos_dynamic2_min_delta_eur
+            name: "Min spread voor duur slot"
+
+      # ── Grafieken ───────────────────────────────────────
+      - type: history-graph
+        title: "Energiebalans (12 uur)"
+        hours_to_show: 12
+        entities:
+          - entity: sensor.eos_solar_power_w
+            name: Zon
+          - entity: sensor.eos_grid_power_w
+            name: Net
+          - entity: sensor.eos_hp_power_w
+            name: WP
+          - entity: sensor.eos_battery_power_w
+            name: Batt
+
+      - type: history-graph
+        title: "Batterij SoC (24 uur)"
+        hours_to_show: 24
+        entities:
+          - entity: sensor.eos_battery_soc_estimate_pct
+            name: SoC gem
+          - entity: sensor.marstek_3x_m1_battery_state_of_charge
+            name: M1
+          - entity: sensor.marstek_3x_m2_battery_state_of_charge
+            name: M2
+          - entity: sensor.marstek_3x_m3_battery_state_of_charge
+            name: M3
+
+      - type: history-graph
+        title: "Tarief (24 uur)"
+        hours_to_show: 24
+        entities:
+          - entity: sensor.eos_tariff_eur_kwh
+            name: Tarief
+
+      # ── Zonneplan urenforecast ──────────────────────────
+      - type: markdown
+        title: "Tarief komende 24 uur (Zonneplan)"
+        content: >
+          {% set _raw = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') %}
+          {% set fc = _raw if (_raw is iterable and _raw is not string and _raw is not mapping) else [] %}
+          {% set cheap = states('input_number.eos_tariff_cheap') | float(0.10) %}
+          {% set exp = states('input_number.eos_tariff_expensive') | float(0.28) %}
+          {% set now_ts = as_timestamp(now()) | int %}
+          {% set ns = namespace(rows='') %}
+          {% for item in fc %}
+            {% set ts = as_timestamp(item.datetime) | int %}
+            {% if ts >= now_ts - 1800 and ts < now_ts + 86400 %}
+              {% set p = (item.electricity_price | float(0)) / 10000000 %}
+              {% set lvl = '🟢' if p < cheap else ('🔴' if p > exp else '🟡') %}
+              {% set bar = '▓' * ((p / 0.50 * 12) | int | max(1)) %}
+              {% set ns.rows = ns.rows + '| ' + (ts | timestamp_custom('%H:%M', true)) + ' | ' + (p | round(3) | string) + ' | ' + lvl + ' ' + bar + ' |\n' %}
+            {% endif %}
+          {% endfor %}
+          | Tijd | €/kWh | Niveau |
+          |------|------:|-------|
+          {{ ns.rows }}
+
+      # ── KPI's vandaag ───────────────────────────────────
+      - type: entities
+        title: "KPI's vandaag"
+        entities:
+          - entity: sensor.eos_today_grid_import_kwh
+            name: "Grid import"
+          - entity: sensor.eos_today_grid_export_kwh
+            name: "Grid export"
+          - entity: sensor.eos_kpi_self_consumption_pct
+            name: "Zelfverbruik %"
+          - entity: sensor.eos_today_battery_charge_kwh
+            name: "Batterij geladen"
+            icon: mdi:battery-arrow-down-outline
+          - entity: sensor.eos_today_battery_discharge_kwh
+            name: "Batterij ontladen"
+            icon: mdi:battery-arrow-up-outline
+          - type: divider
+          - entity: sensor.eos_today_grid_import_cost_eur
+            name: "Importkosten"
+          - entity: sensor.eos_today_grid_export_revenue_eur
+            name: "Exportopbrengst"
+          - entity: sensor.eos_today_net_energy_cost_eur
+            name: "Netto energiekosten"
+          - entity: sensor.eos_arbitrage_savings_today_eur
+            name: "Arbitrage besparing (schatting)"
+          - entity: sensor.eos_today_solar_kwh
+            name: "Zonproductie"
+            icon: mdi:solar-power
+          - entity: sensor.eos_today_house_consumption_kwh
+            name: "Huisverbruik"
+            icon: mdi:home-lightning-bolt
+
+      # ── KPI's deze maand ─────────────────────────────────
+      - type: entities
+        title: "KPI's deze maand"
+        entities:
+          - entity: sensor.eos_month_solar_kwh
+            name: "Zonproductie"
+            icon: mdi:solar-power
+          - entity: sensor.eos_month_grid_import_kwh
+            name: "Grid import"
+          - entity: sensor.eos_month_grid_export_kwh
+            name: "Grid export"
+          - entity: sensor.eos_month_battery_charge_kwh
+            name: "Batterij geladen"
+            icon: mdi:battery-arrow-down-outline
+          - entity: sensor.eos_month_battery_discharge_kwh
+            name: "Batterij ontladen"
+            icon: mdi:battery-arrow-up-outline
+          - entity: sensor.eos_battery_equiv_full_cycles_month
+            name: "Volle cycli (equiv.)"
+            icon: mdi:battery-sync
+          - type: divider
+          - entity: sensor.eos_month_grid_import_cost_eur
+            name: "Importkosten"
+          - entity: sensor.eos_month_grid_export_revenue_eur
+            name: "Exportopbrengst"
+          - entity: sensor.eos_month_net_energy_cost_eur
+            name: "Netto energiekosten"
+
+      # ── M14: Energie Sankey (vandaag) ────────────────────
+      - type: custom:sankey-chart
+        title: "Energie Sankey (vandaag)"
+        unit_of_measurement: kWh
+        sections:
+          - entities:
+              - entity_id: sensor.eos_today_solar_kwh
+                label: "Zon"
+                color: "#f5b400"
+              - entity_id: sensor.eos_today_grid_import_kwh
+                label: "Net import"
+                color: "#e74c3c"
+              - entity_id: sensor.eos_today_battery_discharge_kwh
+                label: "Batt uit"
+                color: "#3498db"
+          - entities:
+              - entity_id: sensor.eos_today_house_consumption_kwh
+                label: "Huis"
+                color: "#2ecc71"
+              - entity_id: sensor.eos_today_battery_charge_kwh
+                label: "Batt in"
+                color: "#3498db"
+              - entity_id: sensor.eos_today_grid_export_kwh
+                label: "Net export"
+                color: "#9b59b6"
+        connections:
+          - source: sensor.eos_today_solar_kwh
+            targets:
+              - sensor.eos_today_house_consumption_kwh
+              - sensor.eos_today_battery_charge_kwh
+              - sensor.eos_today_grid_export_kwh
+          - source: sensor.eos_today_grid_import_kwh
+            targets:
+              - sensor.eos_today_house_consumption_kwh
+          - source: sensor.eos_today_battery_discharge_kwh
+            targets:
+              - sensor.eos_today_house_consumption_kwh
+
+      # ── DHW ─────────────────────────────────────────────
+      - type: entities
+        title: "DHW warmwater"
+        entities:
+          - entity: sensor.eos_dhw_top_c
+            name: "Tank top temperatuur"
+          - entity: sensor.eos_dhw_preheat_opportunity
+            name: "Pre-heat kans"
+          - entity: input_boolean.eos_dhw_solar_boost_enabled
+            name: "Solar boost: toestaan (slider)"
+          - entity: input_boolean.eos_dhw_solar_boost_active
+            name: "Solar boost actief nu"
+          - entity: binary_sensor.openquatt_ext_dhw_solar_boost
+            name: "Solar boost signaal → OpenQuatt"
+          - entity: input_number.eos_dhw_preheat_max_temp_c
+            name: "Max temp voor boost"
+          - entity: input_number.eos_dhw_solar_surplus_threshold_w
+            name: "Min solar surplus voor boost"
+
+      # ── Anomalieën ──────────────────────────────────────
+      - type: entities
+        title: "Anomalieën"
+        entities:
+          - entity: binary_sensor.eos_anomaly_hp_high_power
+            name: "HP hoog vermogen"
+          - entity: binary_sensor.eos_anomaly_grid_export_spike
+            name: "Grid export piek"
+          - entity: binary_sensor.eos_anomaly_battery_idle_when_useful
+            name: "Batterij idle ondanks kans"
+
+  # ─── VIEW 3: TUNING ───────────────────────────────────────
+  - title: TUNING
+    path: eos-tuning
+    icon: mdi:tune
+    cards:
+      # ── Tariefdrempels ──────────────────────────────────
+      - type: entities
+        title: "Tariefdrempels (Dynamic)"
+        entities:
+          - entity: input_boolean.eos_tariff_auto_threshold
+            name: "Automatisch (24h forecast)"
+            icon: mdi:chart-bar
+          - entity: sensor.eos_tariff_cheap_auto
+            name: "Auto: goedkoop drempel"
+            icon: mdi:arrow-down-bold-circle
+          - entity: sensor.eos_tariff_expensive_auto
+            name: "Auto: duur drempel"
+            icon: mdi:arrow-up-bold-circle
+          - entity: input_number.eos_tariff_cheap_fraction
+            name: "Goedkoop: % van uren"
+          - entity: input_number.eos_tariff_expensive_fraction
+            name: "Duur: % van uren"
+          - type: divider
+          - entity: input_number.eos_tariff_cheap
+            name: "Vast: goedkoop < (€/kWh)"
+          - entity: input_number.eos_tariff_expensive
+            name: "Vast: duur > (€/kWh)"
+
+      # ── Grid limieten ───────────────────────────────────
+      - type: entities
+        title: "Grid limieten"
+        entities:
+          - entity: input_number.eos_grid_soft_limit_w
+            name: "Soft limit (W)"
+          - entity: input_number.eos_grid_hard_limit_w
+            name: "Hard limit (W) — peak shave"
+          - entity: input_boolean.eos_peak_shave_in_manual
+            name: "Peak shave opt-in in Handmatig/Timed"
+
+      # ── Batterij instellingen ───────────────────────────
+      - type: entities
+        title: "Batterij"
+        entities:
+          - entity: input_number.eos_min_soc_for_eve_discharge
+            name: "Min SoC voor ontladen (%)"
+          - entity: input_number.eos_charge_target_soc
+            name: "Charge doel SoC (%)"
+          - entity: input_select.eos_charge_goal_reached
+            name: "Na Charge vol → modus"
+          - entity: input_select.eos_sell_goal_reached
+            name: "Na Sell leeg → modus"
+
+      # ── PI controller ───────────────────────────────────
+      - type: entities
+        title: "PI Controller"
+        entities:
+          - entity: number.schuur_marstek_3x_eos_pid_kp
+            name: "Kp"
+          - entity: number.schuur_marstek_3x_eos_pid_ki
+            name: "Ki"
+          - entity: switch.schuur_marstek_3x_eos_pid_autotune
+            name: "Autotune starten"
+          - entity: sensor.schuur_marstek_3x_eos_autotune_status
+            name: "Autotune status"
+          - entity: switch.schuur_marstek_3x_eos_strategy_verbose_log
+            name: "Verbose logging"
+
+      # ── Dynamic 2 pair-matching ─────────────────────────
+      - type: entities
+        title: "Dynamic 2 pair-matching"
+        entities:
+          - entity: input_number.eos_dynamic2_cheapest_hrs
+            name: "Goedkope uren per dag"
+          - entity: input_number.eos_dynamic2_expensive_hrs
+            name: "Dure uren per dag"
+          - entity: input_number.eos_dynamic2_min_delta_eur
+            name: "Min spread (€/kWh)"
+          - entity: sensor.eos_dynamic2_period_type
+            name: "Huidig periode-type"
+
+      # ── Warmtepomp coördinatie ──────────────────────────
+      - type: entities
+        title: "Warmtepomp coördinatie"
+        entities:
+          - entity: input_number.eos_hp_cap_override
+            name: "HP cap (live)"
+          - entity: input_number.eos_hp_min_cap_during_sell
+            name: "HP cap bij Sell"
+          - entity: input_number.eos_hp_min_cap_during_charge
+            name: "HP cap bij Charge"
+
+      # ── M15: Optimaal laden ─────────────────────────────
+      - type: entities
+        title: "Optimaal laden (auto-inplannen)"
+        entities:
+          - entity: input_boolean.eos_optimal_charge_enabled
+            name: "Automatisch inplannen"
+            icon: mdi:calendar-star
+          - entity: sensor.eos_optimal_charge_hours_needed
+            name: "Benodigde laadtijd"
+            icon: mdi:clock-fast
+          - entity: sensor.eos_optimal_charge_window_start
+            name: "Goedkoopste start"
+            icon: mdi:clock-start
+          - entity: sensor.eos_optimal_charge_window_stop
+            name: "Goedkoopste stop"
+            icon: mdi:clock-end
+          - entity: sensor.eos_optimal_charge_window_avg_price
+            name: "Gem. prijs venster"
+            icon: mdi:currency-eur
+          - entity: input_number.eos_charge_power_kw
+            name: "Verwacht laadvermogen"
+            icon: mdi:lightning-bolt
+          - entity: input_number.eos_charge_target_soc
+            name: "Doel SoC (%)"
+
+      # ── M12B: Laadschema ────────────────────────────────
+      - type: entities
+        title: "Laadschema (handmatig / auto-resultaat)"
+        entities:
+          - entity: input_boolean.eos_timed_schedule_enabled
+            name: "Schema actief"
+            icon: mdi:calendar-clock
+          - entity: input_datetime.eos_timed_charge_start
+            name: "Laadstart"
+            icon: mdi:clock-start
+          - entity: input_datetime.eos_timed_charge_stop
+            name: "Laadstop"
+            icon: mdi:clock-end
+          - entity: input_select.eos_timed_after_charge_mode
+            name: "Na laden → modus"
+            icon: mdi:calendar-arrow-right
+          - entity: input_number.eos_charge_target_soc
+            name: "Charge doel SoC (%)"
+
+      # ── M15: Verkoopschema ───────────────────────────────
+      - type: entities
+        title: "Verkoopschema (handmatig / auto-resultaat)"
+        entities:
+          - entity: input_boolean.eos_timed_sell_enabled
+            name: "Schema actief"
+            icon: mdi:calendar-arrow-up
+          - entity: input_datetime.eos_timed_sell_start
+            name: "Verkoopstart"
+            icon: mdi:clock-start
+          - entity: input_datetime.eos_timed_sell_stop
+            name: "Verkoopstop"
+            icon: mdi:clock-end
+          - entity: input_select.eos_timed_after_sell_mode
+            name: "Na ontladen → modus"
+            icon: mdi:calendar-arrow-right
+          - entity: input_number.eos_min_soc_for_eve_discharge
+            name: "Min SoC vloer (%)"
+
+      # ── M15: Optimaal ontladen ───────────────────────────
+      - type: entities
+        title: "Optimaal ontladen (auto-inplannen)"
+        entities:
+          - entity: input_boolean.eos_optimal_sell_enabled
+            name: "Automatisch inplannen"
+            icon: mdi:calendar-minus
+          - entity: sensor.eos_sell_decision
+            name: "Beslissing"
+            icon: mdi:scale-balance
+          - entity: sensor.eos_sell_spread_eur
+            name: "Huidige spread"
+            icon: mdi:delta
+          - entity: input_number.eos_sell_min_spread_eur
+            name: "Min spread voor verkoop"
+            icon: mdi:delta
+          - entity: sensor.eos_optimal_sell_hours_available
+            name: "Beschikbare ontlaadtijd"
+            icon: mdi:clock-fast
+          - entity: sensor.eos_optimal_sell_window_start
+            name: "Duurste start"
+            icon: mdi:clock-start
+          - entity: sensor.eos_optimal_sell_window_stop
+            name: "Duurste stop"
+            icon: mdi:clock-end
+          - entity: sensor.eos_optimal_sell_window_avg_price
+            name: "Gem. prijs venster"
+            icon: mdi:currency-eur
+          - entity: input_number.eos_discharge_power_kw
+            name: "Verwacht ontlaadvermogen"
+            icon: mdi:lightning-bolt-outline
+
+      # ── M13: Batterijgezondheid ──────────────────────────
+      - type: entities
+        title: "Batterijgezondheid (SoH)"
+        entities:
+          - entity: sensor.eos_battery_health_estimate_pct
+            name: "Geschatte SoH (%)"
+            icon: mdi:battery-heart-variant
+          - entity: sensor.eos_battery_equiv_full_cycles_month
+            name: "Volle cycli deze maand"
+            icon: mdi:battery-sync
+          - entity: input_number.eos_battery_measured_capacity_kwh
+            name: "Gemeten capaciteit (kWh)"
+            icon: mdi:battery-check
+          - entity: input_boolean.eos_battery_soh_cycle_active
+            name: "Auto-meting actief"
+            icon: mdi:progress-check
+
+      # ── Doel-gewichten ──────────────────────────────────
+      - type: entities
+        title: "Doel-gewichten"
+        entities:
+          - entity: input_number.eos_goal_comfort
+            name: "Comfort"
+          - entity: input_number.eos_goal_cost
+            name: "Kosten besparen"
+          - entity: input_number.eos_goal_self_consumption
+            name: "Zelfverbruik"
+          - entity: input_number.eos_goal_lifetime
+            name: "Levensduur"
+          - entity: input_number.eos_goal_grid_friendly
+            name: "Netgezindheid"
+          - entity: input_number.eos_comfort_band_c
+            name: "Comfort band (°C)"
