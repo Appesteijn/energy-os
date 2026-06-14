@@ -1,0 +1,201 @@
+# ============================================================
+# EnergyOS — HomeWizard kWh meter (lokale JSON API v1)
+# IP:    192.168.1.16
+# Poll:  elke 5 s
+# Levert: netto vermogen + stroom per fase, spanning, kWh tellers,
+#         frequentie — direct op de ESP beschikbaar (geen HA relay).
+# ============================================================
+
+http_request:
+  useragent: esphome/eos-homewizard
+  timeout: 5s
+
+interval:
+  - interval: 5s
+    then:
+      - http_request.get:
+          url: "http://192.168.1.16/api/v1/data"
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code != 200) return;
+                  json::parse_json(body, [](JsonObject root) -> bool {
+                    id(hw_grid_power_w).publish_state(   root["active_power_w"]    | 0.0f);
+                    id(hw_grid_power_l1_w).publish_state(root["active_power_l1_w"] | 0.0f);
+                    id(hw_grid_power_l2_w).publish_state(root["active_power_l2_w"] | 0.0f);
+                    id(hw_grid_power_l3_w).publish_state(root["active_power_l3_w"] | 0.0f);
+                    id(hw_voltage_l1_v).publish_state(   root["active_voltage_l1_v"] | 0.0f);
+                    id(hw_voltage_l2_v).publish_state(   root["active_voltage_l2_v"] | 0.0f);
+                    id(hw_voltage_l3_v).publish_state(   root["active_voltage_l3_v"] | 0.0f);
+                    id(hw_current_l1_a).publish_state(   root["active_current_l1_a"] | 0.0f);
+                    id(hw_current_l2_a).publish_state(   root["active_current_l2_a"] | 0.0f);
+                    id(hw_current_l3_a).publish_state(   root["active_current_l3_a"] | 0.0f);
+                    id(hw_import_kwh).publish_state(     root["total_power_import_kwh"] | 0.0f);
+                    id(hw_export_kwh).publish_state(     root["total_power_export_kwh"] | 0.0f);
+                    id(hw_frequency_hz).publish_state(   root["active_frequency_hz"] | 50.0f);
+                    return true;
+                  });
+
+sensor:
+  # ── Netto vermogen (gesigneerd: + = import, − = export) ───
+  - platform: template
+    name: "HW Grid Power W"
+    id: hw_grid_power_w
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:transmission-tower
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 10
+
+  - platform: template
+    name: "HW Grid Power L1 W"
+    id: hw_grid_power_l1_w
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:numeric-1-circle-outline
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 11
+
+  - platform: template
+    name: "HW Grid Power L2 W"
+    id: hw_grid_power_l2_w
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:numeric-2-circle-outline
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 12
+
+  - platform: template
+    name: "HW Grid Power L3 W"
+    id: hw_grid_power_l3_w
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:numeric-3-circle-outline
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 13
+
+  # ── Stroom per fase (max 25 A per fase bij 3×25A aansluiting) ─
+  - platform: template
+    name: "HW Current L1 A"
+    id: hw_current_l1_a
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 2
+    icon: mdi:current-ac
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 14
+
+  - platform: template
+    name: "HW Current L2 A"
+    id: hw_current_l2_a
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 2
+    icon: mdi:current-ac
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 15
+
+  - platform: template
+    name: "HW Current L3 A"
+    id: hw_current_l3_a
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 2
+    icon: mdi:current-ac
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 16
+
+  # ── Spanning per fase ─────────────────────────────────────
+  - platform: template
+    name: "HW Voltage L1 V"
+    id: hw_voltage_l1_v
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 10
+
+  - platform: template
+    name: "HW Voltage L2 V"
+    id: hw_voltage_l2_v
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 11
+
+  - platform: template
+    name: "HW Voltage L3 V"
+    id: hw_voltage_l3_v
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 12
+
+  # ── Cumulatieve kWh (rechtstreeks van kWh-meter — nauwkeuriger ──
+  # dan eos_01_data.yaml triggered-template accumulatie).
+  # Gebruik als bron voor utility_meter in eos_01_data.yaml.
+  - platform: template
+    name: "HW Import kWh"
+    id: hw_import_kwh
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 3
+    icon: mdi:transmission-tower-import
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 20
+
+  - platform: template
+    name: "HW Export kWh"
+    id: hw_export_kwh
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 3
+    icon: mdi:transmission-tower-export
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 21
+
+  # ── Netfrequentie ─────────────────────────────────────────
+  - platform: template
+    name: "HW Frequency Hz"
+    id: hw_frequency_hz
+    unit_of_measurement: "Hz"
+    device_class: frequency
+    state_class: measurement
+    accuracy_decimals: 3
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 13
