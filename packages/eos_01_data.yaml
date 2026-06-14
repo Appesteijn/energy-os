@@ -15,8 +15,9 @@ template:
         unit_of_measurement: "W"
         device_class: power
         state_class: measurement
+        # HW L1 = zonnepanelen; negatief = productie → negeer en klem op ≥ 0
         state: >
-          {{ states('sensor.kwh_meter_3_phase_vermogen_fase_3') | float(0) | round(0) }}
+          {{ [states('sensor.schuur_marstek_3x_hw_solar_power_w') | float(0) * -1, 0] | max | round(0) }}
         icon: mdi:solar-power
 
       - name: "eos_grid_power_w"
