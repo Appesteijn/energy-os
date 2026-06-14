@@ -646,11 +646,14 @@ views:
           - type: divider
           - entity: input_boolean.eos_phase_detect_running
             name: "Detectie actief"
-          - type: button
-            name: "Start fase-detectie"
-            tap_action:
-              action: call-service
-              service: script.eos_phase_detect
+      - type: button
+        name: "Start fase-detectie"
+        icon: mdi:magnify-scan
+        tap_action:
+          action: perform-action
+          perform_action: script.turn_on
+          target:
+            entity_id: script.eos_phase_detect
 
       # ── Batterij instellingen ───────────────────────────
       - type: entities
