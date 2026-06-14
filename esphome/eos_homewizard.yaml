@@ -27,13 +27,6 @@ interval:
             then:
               - lambda: |-
                   if (response->status_code != 200) return;
-                  std::string body;
-                  char buf[512];
-                  int len;
-                  while ((len = response->read((uint8_t *)buf, sizeof(buf) - 1)) > 0) {
-                    buf[len] = '\0';
-                    body += buf;
-                  }
                   json::parse_json(body, [](JsonObject root) -> bool {
                     // Sub-verdeling totaal
                     id(hw_subpanel_power_w).publish_state(root["active_power_w"] | 0.0f);
