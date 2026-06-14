@@ -54,28 +54,6 @@ template:
         state: "{{ states('sensor.esp32_s3_zero_p1_netto_vermogen_l3_watt') | float(0) | round(0) }}"
         icon: mdi:numeric-3-circle-outline
 
-      # ─── Per-fase over-limit binary sensor ───────────────
-      - name: "eos_grid_l1_over_limit"
-        unique_id: eos_grid_l1_over_limit
-        state: >
-          {{ states('sensor.eos_grid_power_l1_w') | float(0) >
-             states('input_number.eos_grid_phase_limit_w') | float(5500) }}
-        icon: mdi:alert-circle
-
-      - name: "eos_grid_l2_over_limit"
-        unique_id: eos_grid_l2_over_limit
-        state: >
-          {{ states('sensor.eos_grid_power_l2_w') | float(0) >
-             states('input_number.eos_grid_phase_limit_w') | float(5500) }}
-        icon: mdi:alert-circle
-
-      - name: "eos_grid_l3_over_limit"
-        unique_id: eos_grid_l3_over_limit
-        state: >
-          {{ states('sensor.eos_grid_power_l3_w') | float(0) >
-             states('input_number.eos_grid_phase_limit_w') | float(5500) }}
-        icon: mdi:alert-circle
-
       - name: "eos_battery_power_w"
         unique_id: eos_battery_power_w
         unit_of_measurement: "W"
@@ -371,6 +349,28 @@ template:
           {{ states('sensor.ev_stop_trigger_autos_aan_de_lader_thuis').lower()
              not in ['off', 'uit', '0', 'false', 'unavailable', 'unknown', 'none', ''] }}
         icon: mdi:ev-station
+
+      # ─── Per-fase over-limiet ────────────────────────────
+      - name: "eos_grid_l1_over_limit"
+        unique_id: eos_grid_l1_over_limit
+        state: >
+          {{ states('sensor.eos_grid_power_l1_w') | float(0) >
+             states('input_number.eos_grid_phase_limit_w') | float(5500) }}
+        icon: mdi:alert-circle
+
+      - name: "eos_grid_l2_over_limit"
+        unique_id: eos_grid_l2_over_limit
+        state: >
+          {{ states('sensor.eos_grid_power_l2_w') | float(0) >
+             states('input_number.eos_grid_phase_limit_w') | float(5500) }}
+        icon: mdi:alert-circle
+
+      - name: "eos_grid_l3_over_limit"
+        unique_id: eos_grid_l3_over_limit
+        state: >
+          {{ states('sensor.eos_grid_power_l3_w') | float(0) >
+             states('input_number.eos_grid_phase_limit_w') | float(5500) }}
+        icon: mdi:alert-circle
 
       # ─── OpenQuatt DHW solar boost bridge ───────────────
       # OpenQuatt polls ha_dhw_solar_boost_entity_id = binary_sensor.openquatt_ext_dhw_solar_boost
