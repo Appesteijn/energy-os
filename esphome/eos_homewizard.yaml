@@ -13,17 +13,13 @@
 #   Batterij laadt    → positief
 # ============================================================
 
-http_request:
-  useragent: esphome/eos-homewizard
-  timeout: 5s
-  response_buffer_size: 2048
-
 interval:
   - interval: 1s
     then:
       - http_request.get:
           url: "http://192.168.1.16/api/v1/data"
           capture_response: true
+          max_response_buffer_size: 4096
           on_response:
             then:
               - lambda: |-
