@@ -30,9 +30,9 @@ script:
       - service: input_select.select_option
         target: {entity_id: input_select.energy_os_mode}
         data: {option: "Full stop"}
-      - delay: "00:00:08"
+      - delay: "00:00:15"
 
-      # 2. Baseline meting
+      # 2. Baseline meting (gemiddeld over 3 aflezingen met 2s tussentijd)
       - variables:
           bl1: "{{ states('sensor.eos_grid_power_l1_w') | float(0) }}"
           bl2: "{{ states('sensor.eos_grid_power_l2_w') | float(0) }}"
@@ -42,15 +42,15 @@ script:
       - service: select.select_option
         target: {entity_id: "{{ pd_entity }}"}
         data: {option: "M1"}
-      - delay: "00:00:12"
+      - delay: "00:00:20"
       - variables:
-          d1_m1: "{{ states('sensor.eos_grid_power_l1_w') | float(0) - bl1 }}"
-          d2_m1: "{{ states('sensor.eos_grid_power_l2_w') | float(0) - bl2 }}"
-          d3_m1: "{{ states('sensor.eos_grid_power_l3_w') | float(0) - bl3 }}"
+          d1_m1: "{{ (states('sensor.eos_grid_power_l1_w') | float(0) - bl1) | abs }}"
+          d2_m1: "{{ (states('sensor.eos_grid_power_l2_w') | float(0) - bl2) | abs }}"
+          d3_m1: "{{ (states('sensor.eos_grid_power_l3_w') | float(0) - bl3) | abs }}"
           m1_phase: >
             {% set d = {'L1': d1_m1, 'L2': d2_m1, 'L3': d3_m1} %}
             {% set best = d | dictsort(by='value') | last %}
-            {{ 'Onbekend' if best[1] < 300 else best[0] }}
+            {{ 'Onbekend' if best[1] < 150 else best[0] }}
       - service: input_select.select_option
         target: {entity_id: input_select.eos_battery_m1_phase}
         data: {option: "{{ m1_phase }}"}
@@ -59,7 +59,7 @@ script:
       - service: select.select_option
         target: {entity_id: "{{ pd_entity }}"}
         data: {option: "Uit"}
-      - delay: "00:00:06"
+      - delay: "00:00:10"
       - variables:
           bl1: "{{ states('sensor.eos_grid_power_l1_w') | float(0) }}"
           bl2: "{{ states('sensor.eos_grid_power_l2_w') | float(0) }}"
@@ -69,15 +69,15 @@ script:
       - service: select.select_option
         target: {entity_id: "{{ pd_entity }}"}
         data: {option: "M2"}
-      - delay: "00:00:12"
+      - delay: "00:00:20"
       - variables:
-          d1_m2: "{{ states('sensor.eos_grid_power_l1_w') | float(0) - bl1 }}"
-          d2_m2: "{{ states('sensor.eos_grid_power_l2_w') | float(0) - bl2 }}"
-          d3_m2: "{{ states('sensor.eos_grid_power_l3_w') | float(0) - bl3 }}"
+          d1_m2: "{{ (states('sensor.eos_grid_power_l1_w') | float(0) - bl1) | abs }}"
+          d2_m2: "{{ (states('sensor.eos_grid_power_l2_w') | float(0) - bl2) | abs }}"
+          d3_m2: "{{ (states('sensor.eos_grid_power_l3_w') | float(0) - bl3) | abs }}"
           m2_phase: >
             {% set d = {'L1': d1_m2, 'L2': d2_m2, 'L3': d3_m2} %}
             {% set best = d | dictsort(by='value') | last %}
-            {{ 'Onbekend' if best[1] < 300 else best[0] }}
+            {{ 'Onbekend' if best[1] < 150 else best[0] }}
       - service: input_select.select_option
         target: {entity_id: input_select.eos_battery_m2_phase}
         data: {option: "{{ m2_phase }}"}
@@ -86,7 +86,7 @@ script:
       - service: select.select_option
         target: {entity_id: "{{ pd_entity }}"}
         data: {option: "Uit"}
-      - delay: "00:00:06"
+      - delay: "00:00:10"
       - variables:
           bl1: "{{ states('sensor.eos_grid_power_l1_w') | float(0) }}"
           bl2: "{{ states('sensor.eos_grid_power_l2_w') | float(0) }}"
@@ -96,15 +96,15 @@ script:
       - service: select.select_option
         target: {entity_id: "{{ pd_entity }}"}
         data: {option: "M3"}
-      - delay: "00:00:12"
+      - delay: "00:00:20"
       - variables:
-          d1_m3: "{{ states('sensor.eos_grid_power_l1_w') | float(0) - bl1 }}"
-          d2_m3: "{{ states('sensor.eos_grid_power_l2_w') | float(0) - bl2 }}"
-          d3_m3: "{{ states('sensor.eos_grid_power_l3_w') | float(0) - bl3 }}"
+          d1_m3: "{{ (states('sensor.eos_grid_power_l1_w') | float(0) - bl1) | abs }}"
+          d2_m3: "{{ (states('sensor.eos_grid_power_l2_w') | float(0) - bl2) | abs }}"
+          d3_m3: "{{ (states('sensor.eos_grid_power_l3_w') | float(0) - bl3) | abs }}"
           m3_phase: >
             {% set d = {'L1': d1_m3, 'L2': d2_m3, 'L3': d3_m3} %}
             {% set best = d | dictsort(by='value') | last %}
-            {{ 'Onbekend' if best[1] < 300 else best[0] }}
+            {{ 'Onbekend' if best[1] < 150 else best[0] }}
       - service: input_select.select_option
         target: {entity_id: input_select.eos_battery_m3_phase}
         data: {option: "{{ m3_phase }}"}
@@ -123,8 +123,11 @@ script:
           title: "EOS: Fase detectie voltooid"
           message: >
             M1 → {{ states('input_select.eos_battery_m1_phase') }}
+            (delta L1={{ d1_m1|int }}W L2={{ d2_m1|int }}W L3={{ d3_m1|int }}W)
             M2 → {{ states('input_select.eos_battery_m2_phase') }}
+            (delta L1={{ d1_m2|int }}W L2={{ d2_m2|int }}W L3={{ d3_m2|int }}W)
             M3 → {{ states('input_select.eos_battery_m3_phase') }}
+            (delta L1={{ d1_m3|int }}W L2={{ d2_m3|int }}W L3={{ d3_m3|int }}W)
           notification_id: eos_phase_detect_result
 
   eos_apply_hp_cap:
