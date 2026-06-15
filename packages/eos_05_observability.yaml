@@ -49,7 +49,11 @@ template:
           {% elif surplus > 200 %}Charge PV
           {% else %}Self-consumption{% endif %}
 
-      # ─── KPI's vandaag ───────────────────────────────────
+      # ─── KPI's vandaag ─────────────────────────────────
+      # eos_today_grid_import_kwh / _export / _battery_charge / _discharge /
+      # _solar_kwh en alle maandelijkse en euro-KPI's komen rechtstreeks
+      # van de utility_meters in eos_01_data.yaml (zelfde naam).
+      # Hier staan alleen berekende/afgeleide sensors.
       - name: "eos_kpi_self_consumption_pct"
         unique_id: eos_kpi_self_consumption_pct
         unit_of_measurement: "%"
@@ -66,53 +70,6 @@ template:
             {{ pct_hi }}
           {% else %}0{% endif %}
 
-      - name: "eos_today_grid_import_kwh"
-        unique_id: eos_today_grid_import_kwh
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: measurement
-        state: >
-          {{ states('sensor.eos_today_grid_import_meter') | float(0) }}
-
-      - name: "eos_today_grid_export_kwh"
-        unique_id: eos_today_grid_export_kwh
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: measurement
-        state: >
-          {{ states('sensor.eos_today_grid_export_meter') | float(0) }}
-
-      - name: "eos_today_battery_charge_kwh"
-        unique_id: eos_today_battery_charge_kwh
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: measurement
-        state: "{{ states('sensor.eos_today_battery_charge_meter') | float(0) | round(2) }}"
-        icon: mdi:battery-arrow-down-outline
-
-      - name: "eos_today_battery_discharge_kwh"
-        unique_id: eos_today_battery_discharge_kwh
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: measurement
-        state: "{{ states('sensor.eos_today_battery_discharge_meter') | float(0) | round(2) }}"
-        icon: mdi:battery-arrow-up-outline
-
-      # ─── Dagelijkse euro-balance ─────────────────────────
-      - name: "eos_today_grid_import_cost_eur"
-        unique_id: eos_today_grid_import_cost_eur
-        unit_of_measurement: "€"
-        state_class: measurement
-        icon: mdi:cash-minus
-        state: "{{ states('sensor.eos_today_grid_import_cost_meter') | float(0) | round(3) }}"
-
-      - name: "eos_today_grid_export_revenue_eur"
-        unique_id: eos_today_grid_export_revenue_eur
-        unit_of_measurement: "€"
-        state_class: measurement
-        icon: mdi:cash-plus
-        state: "{{ states('sensor.eos_today_grid_export_revenue_meter') | float(0) | round(3) }}"
-
       - name: "eos_today_net_energy_cost_eur"
         unique_id: eos_today_net_energy_cost_eur
         unit_of_measurement: "€"
@@ -123,53 +80,7 @@ template:
           {% set rev  = states('sensor.eos_today_grid_export_revenue_eur') | float(0) %}
           {{ (cost - rev) | round(3) }}
 
-      # ─── Maandelijkse KPI's ──────────────────────────────
-      - name: "eos_month_grid_import_kwh"
-        unique_id: eos_month_grid_import_kwh
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: total_increasing
-        state: "{{ states('sensor.eos_month_grid_import_kwh_meter') | float(0) | round(2) }}"
-        icon: mdi:transmission-tower-import
-
-      - name: "eos_month_grid_export_kwh"
-        unique_id: eos_month_grid_export_kwh
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: total_increasing
-        state: "{{ states('sensor.eos_month_grid_export_kwh_meter') | float(0) | round(2) }}"
-        icon: mdi:transmission-tower-export
-
-      - name: "eos_month_battery_charge_kwh"
-        unique_id: eos_month_battery_charge_kwh
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: total_increasing
-        state: "{{ states('sensor.eos_month_battery_charge_kwh_meter') | float(0) | round(2) }}"
-        icon: mdi:battery-arrow-down-outline
-
-      - name: "eos_month_battery_discharge_kwh"
-        unique_id: eos_month_battery_discharge_kwh
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: total_increasing
-        state: "{{ states('sensor.eos_month_battery_discharge_kwh_meter') | float(0) | round(2) }}"
-        icon: mdi:battery-arrow-up-outline
-
-      - name: "eos_month_grid_import_cost_eur"
-        unique_id: eos_month_grid_import_cost_eur
-        unit_of_measurement: "€"
-        state_class: total_increasing
-        icon: mdi:cash-minus
-        state: "{{ states('sensor.eos_month_grid_import_cost_meter') | float(0) | round(2) }}"
-
-      - name: "eos_month_grid_export_revenue_eur"
-        unique_id: eos_month_grid_export_revenue_eur
-        unit_of_measurement: "€"
-        state_class: total_increasing
-        icon: mdi:cash-plus
-        state: "{{ states('sensor.eos_month_grid_export_revenue_meter') | float(0) | round(2) }}"
-
+      # ─── Maandelijkse berekende sensors ─────────────────
       - name: "eos_month_net_energy_cost_eur"
         unique_id: eos_month_net_energy_cost_eur
         unit_of_measurement: "€"
@@ -186,23 +97,6 @@ template:
         device_class: energy
         state_class: total_increasing
         state: "{{ states('input_number.eos_counter_base_load_kwh') | float(0) | round(2) }}"
-
-      # ─── M14: Dagelijkse energie-stroom sensoren ──────────
-      - name: "eos_today_solar_kwh"
-        unique_id: eos_today_solar_kwh
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: total_increasing
-        state: "{{ states('sensor.eos_today_solar_production_meter') | float(0) | round(2) }}"
-        icon: mdi:solar-power
-
-      - name: "eos_month_solar_kwh"
-        unique_id: eos_month_solar_kwh
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: total_increasing
-        state: "{{ states('sensor.eos_month_solar_production_meter') | float(0) | round(2) }}"
-        icon: mdi:solar-power
 
       # Huis verbruik vandaag = zon + import + ontladen − export − laden
       - name: "eos_today_house_consumption_kwh"
