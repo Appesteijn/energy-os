@@ -469,73 +469,73 @@ template:
           {{ [last + rate / 12, last] | max | round(5) }}
 
 utility_meter:
-  eos_today_grid_import_meter:
+  eos_today_grid_import_kwh:
     source: sensor.eos_grid_import_cumulative_kwh
     cycle: daily
     name: "EOS Grid import vandaag"
 
-  eos_today_grid_export_meter:
+  eos_today_grid_export_kwh:
     source: sensor.eos_grid_export_cumulative_kwh
     cycle: daily
     name: "EOS Grid export vandaag"
 
-  eos_today_battery_charge_meter:
+  eos_today_battery_charge_kwh:
     source: sensor.eos_battery_charge_cumulative_kwh
     cycle: daily
     name: "EOS Batterij geladen vandaag"
 
-  eos_today_battery_discharge_meter:
+  eos_today_battery_discharge_kwh:
     source: sensor.eos_battery_discharge_cumulative_kwh
     cycle: daily
     name: "EOS Batterij ontladen vandaag"
 
-  eos_today_solar_production_meter:
+  eos_today_solar_kwh:
     source: sensor.eos_solar_production_cumulative_kwh
     cycle: daily
     name: "EOS Zonproductie vandaag"
 
-  eos_month_solar_production_meter:
+  eos_month_solar_kwh:
     source: sensor.eos_solar_production_cumulative_kwh
     cycle: monthly
     name: "EOS Zonproductie deze maand"
 
-  eos_today_grid_import_cost_meter:
+  eos_today_grid_import_cost_eur:
     source: sensor.eos_grid_import_cost_cumulative_eur
     cycle: daily
     name: "EOS Importkosten vandaag"
 
-  eos_today_grid_export_revenue_meter:
+  eos_today_grid_export_revenue_eur:
     source: sensor.eos_grid_export_revenue_cumulative_eur
     cycle: daily
     name: "EOS Exportopbrengst vandaag"
 
   # ─── Maandelijkse meters ──────────────────────────────────
-  eos_month_grid_import_kwh_meter:
+  eos_month_grid_import_kwh:
     source: sensor.eos_grid_import_cumulative_kwh
     cycle: monthly
     name: "EOS Grid import deze maand"
 
-  eos_month_grid_export_kwh_meter:
+  eos_month_grid_export_kwh:
     source: sensor.eos_grid_export_cumulative_kwh
     cycle: monthly
     name: "EOS Grid export deze maand"
 
-  eos_month_battery_charge_kwh_meter:
+  eos_month_battery_charge_kwh:
     source: sensor.eos_battery_charge_cumulative_kwh
     cycle: monthly
     name: "EOS Batterij geladen deze maand"
 
-  eos_month_battery_discharge_kwh_meter:
+  eos_month_battery_discharge_kwh:
     source: sensor.eos_battery_discharge_cumulative_kwh
     cycle: monthly
     name: "EOS Batterij ontladen deze maand"
 
-  eos_month_grid_import_cost_meter:
+  eos_month_grid_import_cost_eur:
     source: sensor.eos_grid_import_cost_cumulative_eur
     cycle: monthly
     name: "EOS Importkosten deze maand"
 
-  eos_month_grid_export_revenue_meter:
+  eos_month_grid_export_revenue_eur:
     source: sensor.eos_grid_export_revenue_cumulative_eur
     cycle: monthly
     name: "EOS Exportopbrengst deze maand"
