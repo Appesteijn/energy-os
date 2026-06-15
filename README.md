@@ -78,6 +78,19 @@ verlengt automatisch hoe lang de WP geknepen mag blijven.
 
 Zie [INSTALLATIE.md](INSTALLATIE.md).
 
+## Tests
+
+De Jinja-logica van de comfort-guard wordt geborgd met geautomatiseerde tests
+(zie [tests/](tests/)). Ze renderen de échte package-YAML en controleren onder
+meer dat EOS zónder quatt_stooklijn exact het oorspronkelijke gedrag houdt.
+
+```bash
+pip install -r tests/requirements.txt
+pytest -q
+```
+
+CI draait deze automatisch bij elke push/PR.
+
 ## Migratie van v2
 
 v2 bestond uit één bestand (`energy_os.yaml`). v3 is gesplitst in 6 modules met

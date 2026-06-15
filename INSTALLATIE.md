@@ -121,6 +121,37 @@ Voor directe HP throttling vanuit EOS (anders blijft het bij `input_number`):
 3. Flash de firmware
 4. In `eos_03_dispatcher.yaml` → uncomment de regel die schrijft naar `number.openquatt_eos_hp_cap_ha`
 
+## Optioneel: quatt_stooklijn comfort-guard
+
+[quatt_stooklijn](https://github.com/Appesteijn/stooklijn) is een HA custom
+component die een gemeten thermisch model van het huis leert (warmteverlies,
+thermische massa, zonnewinst). Geïnstalleerd verrijkt het Energy OS met
+**prijsgestuurd thermisch uitlopen**: bij een duur tarief knijpt EOS de
+warmtepomp alléén zolang het huis veilig kan uitlopen op zijn thermische massa —
+de zon-forecast telt mee, dus voorspelde zon verlengt de uitlooptijd.
+
+**Niet geïnstalleerd?** Er verandert niets: alle templates vallen via `float(-1)`
+terug op de bestaande heuristiek. Geen harde dependency.
+
+1. Installeer quatt_stooklijn (HACS of handmatig). Na convergentie van het
+   RC-model (~2 dagen) verschijnt `sensor.quatt_warmteanalyse_veilige_uitlooptijd`
+   (veilige uitlooptijd in minuten tot de comfort-vloer).
+2. In de quatt_stooklijn-opties: stel de **comfort-vloer** in (laagste
+   acceptabele binnentemp, default 19 °C) en wijs optioneel de **EOS
+   throttle-entity** aan op `input_number.eos_hp_cap_override` — dan sluit
+   stooklijn door EOS geknepen periodes uit van zijn COP/warmteverlies-analyse.
+3. In Energy OS: stel `input_number.eos_comfort_coast_margin_min` in (default
+   45 min). EOS knijpt de WP bij duur tarief alleen zolang de uitlooptijd boven
+   deze marge ligt; daaronder krijgt comfort voorrang en draait de WP weer vrij.
+
+Verrijkte capabilities (met automatische fallback):
+
+| Capability | Met quatt_stooklijn | Zonder |
+|---|---|---|
+| `eos_asset_hp_cop_estimate` | gemeten COP (`geschatte_actuele_cop`) | Carnot-heuristiek |
+| `eos_asset_hp_can_defer_min` | fysieke coast-tijd (`veilige_uitlooptijd`) | buitentemp-buckets |
+| Dure-tarief throttle | comfort-guard op coast-tijd | alleen batterij-SoC |
+
 ## Volgende ontwikkelstappen
 
 - **Solar forecast integratie** in planner (laag 4) — koppel Solcast/Forecast.Solar
