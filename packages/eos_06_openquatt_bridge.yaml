@@ -1,0 +1,152 @@
+# ============================================================
+# EnergyOS — Laag 6 — OpenQuatt Bridge
+# ============================================================
+# Maakt EOS-data beschikbaar als openquatt_ext_* proxy entiteiten
+# die OpenQuatt's firmware als HA-input contracten leest.
+#
+# OpenQuatt leest via oq_ha_inputs.yaml:
+#   sensor.openquatt_ext_electricity_tariff_now     → Power House tarief-shift
+#   sensor.openquatt_ext_electricity_tariff_avg24   → relatieve kost ratio
+#   sensor.openquatt_ext_grid_net_power             → PV self-consumption boost
+#   binary_sensor.openquatt_ext_dhw_legionella_cheap_window → legionella timing
+#   input_datetime.house_battery_strategy_dynamic_cheapest_start/end → DHW goedkoop venster
+#   input_datetime.house_battery_strategy_dynamic_expensive_start/end → DHW duur venster
+#
+# binary_sensor.openquatt_ext_dhw_solar_boost is al aanwezig in eos_01_data.yaml.
+# ============================================================
+
+template:
+  - sensor:
+      # ─── Tarief nu ──────────────────────────────────────────
+      # OpenQuatt Power House leest dit voor tarief-bewust setpoint-shift:
+      # goedkoop → hogere aanvoertemp (huis pre-warmen),
+      # duur → iets lagere aanvoertemp (bezuinigen).
+      - name: "openquatt_ext_electricity_tariff_now"
+        unique_id: openquatt_ext_electricity_tariff_now
+        unit_of_measurement: "EUR/kWh"
+        state_class: measurement
+        icon: mdi:currency-eur
+        state: "{{ states('sensor.eos_tariff_eur_kwh') | float(0) | round(4) }}"
+
+      # ─── 24h gemiddeld tarief ────────────────────────────────
+      # OpenQuatt berekent ratio = tarief_nu / tarief_avg24.
+      # Ratio > 1 → duur uur, < 1 → goedkoop uur.
+      # Berekend uit dezelfde Zonneplan 24h forecast als EOS.
+      - name: "openquatt_ext_electricity_tariff_avg24"
+        unique_id: openquatt_ext_electricity_tariff_avg24
+        unit_of_measurement: "EUR/kWh"
+        state_class: measurement
+        icon: mdi:chart-line
+        state: >
+          {% set fc = state_attr('sensor.zonneplan_current_electricity_tariff', 'forecast') or [] %}
+          {% set now_ts = as_timestamp(now()) | int %}
+          {% set ns = namespace(prices=[]) %}
+          {% for item in fc %}
+            {% set ts = as_timestamp(item.datetime) | int %}
+            {% if ts >= now_ts and ts < now_ts + 86400 %}
+              {% set ns.prices = ns.prices + [(item.electricity_price | float(0)) / 10000000] %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.prices | length > 0 %}
+            {{ (ns.prices | sum / (ns.prices | length)) | round(4) }}
+          {% else %}
+            {{ states('sensor.eos_tariff_eur_kwh') | float(0.20) | round(4) }}
+          {% endif %}
+
+      # ─── Grid netto vermogen ─────────────────────────────────
+      # OpenQuatt PV self-consumption boost: als grid < 0 (export), mag HP
+      # meer stroom trekken om zonnestroom zelf te verbruiken.
+      - name: "openquatt_ext_grid_net_power"
+        unique_id: openquatt_ext_grid_net_power
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        icon: mdi:transmission-tower
+        state: "{{ states('sensor.eos_grid_power_w') | float(0) | round(0) }}"
+
+  - binary_sensor:
+      # ─── Goedkoop tarief-venster voor legionella ─────────────
+      # OpenQuatt gebruikt dit om de wekelijkse legionella-cyclus
+      # te plannen in een goedkoop tariefuur (vermijdt duur moment).
+      - name: "openquatt_ext_dhw_legionella_cheap_window"
+        unique_id: openquatt_ext_dhw_legionella_cheap_window
+        icon: mdi:water-thermometer-outline
+        state: >
+          {{ is_state('sensor.eos_tariff_level', 'goedkoop') or
+             is_state('sensor.eos_dynamic2_period_type', 'goedkoop') }}
+
+# ─── Tariefvenster datetimes voor OpenQuatt DHW-timing ────────
+# OpenQuatt leest deze input_datetimes voor:
+#   - DHW pre-heat: begin vóór het einde van het goedkoopste venster
+#   - DHW temperatuurverlaging: buiten het goedkoopste venster (kosten besparen)
+#   - Legionella vermijding: buiten het duurste venster
+#
+# EOS planner berekent de vensters; onderstaande automatie houdt
+# de datetimes gesynchroniseerd.
+input_datetime:
+  house_battery_strategy_dynamic_cheapest_start:
+    name: "EOS: Goedkoopste tariefvenster start"
+    has_date: false
+    has_time: true
+    icon: mdi:clock-start
+
+  house_battery_strategy_dynamic_cheapest_end:
+    name: "EOS: Goedkoopste tariefvenster einde"
+    has_date: false
+    has_time: true
+    icon: mdi:clock-end
+
+  house_battery_strategy_dynamic_expensive_start:
+    name: "EOS: Duurste tariefvenster start"
+    has_date: false
+    has_time: true
+    icon: mdi:clock-start
+
+  house_battery_strategy_dynamic_expensive_end:
+    name: "EOS: Duurste tariefvenster einde"
+    has_date: false
+    has_time: true
+    icon: mdi:clock-end
+
+automation:
+  - id: eos_write_oq_window_datetimes
+    alias: "EOS → OQ: Tariefvenster datetimes bijhouden"
+    description: >
+      Schrijft EOS planner output (goedkoopste/duurste venster) naar de
+      input_datetimes die OpenQuatt's DHW-controller leest voor legionella-
+      planning, pre-heating en temperatuurverlaging buiten goedkope uren.
+    trigger:
+      - platform: time_pattern
+        minutes: "/15"
+      - platform: state
+        entity_id: sensor.eos_optimal_charge_window_start
+      - platform: state
+        entity_id: sensor.eos_optimal_sell_window_start
+      - platform: homeassistant
+        event: start
+    action:
+      - variables:
+          cheap_start: "{{ states('sensor.eos_optimal_charge_window_start') }}"
+          cheap_stop:  "{{ states('sensor.eos_optimal_charge_window_stop') }}"
+          exp_start:   "{{ states('sensor.eos_optimal_sell_window_start') }}"
+          exp_stop:    "{{ states('sensor.eos_optimal_sell_window_stop') }}"
+      - if:
+          - condition: template
+            value_template: "{{ cheap_start not in ['onbekend', 'unavailable', 'unknown', 'none', ''] }}"
+        then:
+          - service: input_datetime.set_datetime
+            target: {entity_id: input_datetime.house_battery_strategy_dynamic_cheapest_start}
+            data: {time: "{{ cheap_start ~ ':00' }}"}
+          - service: input_datetime.set_datetime
+            target: {entity_id: input_datetime.house_battery_strategy_dynamic_cheapest_end}
+            data: {time: "{{ cheap_stop ~ ':00' }}"}
+      - if:
+          - condition: template
+            value_template: "{{ exp_start not in ['onbekend', 'unavailable', 'unknown', 'none', ''] }}"
+        then:
+          - service: input_datetime.set_datetime
+            target: {entity_id: input_datetime.house_battery_strategy_dynamic_expensive_start}
+            data: {time: "{{ exp_start ~ ':00' }}"}
+          - service: input_datetime.set_datetime
+            target: {entity_id: input_datetime.house_battery_strategy_dynamic_expensive_end}
+            data: {time: "{{ exp_stop ~ ':00' }}"}

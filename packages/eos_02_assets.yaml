@@ -108,6 +108,34 @@ template:
           {% else %}5.0{% endif %}
         icon: mdi:chart-line
 
+      # ─── Comfort minimum HP cap (buitentemp-afhankelijk) ────
+      # Nooit onder dit niveau throttlen: bij koud weer heeft de HP
+      # meer capaciteit nodig om het huis op temp te houden.
+      # Schaal: 0=volledig stop, 20=geen beperking.
+      - name: "eos_asset_hp_min_comfort_cap"
+        unique_id: eos_asset_hp_min_comfort_cap
+        state_class: measurement
+        icon: mdi:thermometer-check
+        state: >
+          {% set tout = states('sensor.eos_outside_temp_c') | float(15) %}
+          {% if tout < -5 %}16
+          {% elif tout < 0 %}14
+          {% elif tout < 5 %}12
+          {% elif tout < 10 %}10
+          {% else %}6{% endif %}
+
+      # ─── PV dekt HP volledig ────────────────────────────────
+      # True als PV-productie de HP-consumptie plus een buffer van 400W dekt.
+      # In dat geval heeft HP throttlen geen zin: de HP trekt toch al
+      # van zonne-energie, niet van het net of de batterij.
+      - name: "eos_asset_hp_pv_covered"
+        unique_id: eos_asset_hp_pv_covered
+        icon: mdi:solar-power-variant-outline
+        state: >
+          {% set pv = states('sensor.eos_solar_power_w') | float(0) %}
+          {% set hp = states('sensor.eos_hp_power_w') | float(0) %}
+          {{ pv > 200 and (pv - hp) > 400 }}
+
       # ─── DHW capabilities ─────────────────────────────────
       - name: "eos_asset_dhw_temp_c"
         unique_id: eos_asset_dhw_temp_c

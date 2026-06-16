@@ -152,10 +152,12 @@ script:
             data:
               value: >
                 {{ now().strftime('%H:%M') }} HP cap {{ current }} → {{ desired }}
-      # Optionele ESPHome brug (uncomment na flashen oq_energy_os_bridge.yaml):
-      # - service: number.set_value
-      #   target: {entity_id: number.openquatt_eos_hp_cap_ha}
-      #   data: {value: "{{ desired }}"}
+          # ESPHome brug: schrijft cap naar OpenQuatt firmware (oq_energy_os_bridge.yaml).
+          # Vereist: openquatt/oq_energy_os_bridge.yaml geïnclude in openquatt_duo_lilygo_tconnect+cic.yaml
+          # en firmware geflasht. Commentaar verwijderen zodra bridge actief is.
+          # - service: number.set_value
+          #   target: {entity_id: number.openquatt_eos_hp_cap_ha}
+          #   data: {value: "{{ desired }}"}
 
 # State voor verklaarbaarheid (Laag 5 leest dit uit)
 input_text:
@@ -188,17 +190,22 @@ automation:
         state: "on"
     action:
       - variables:
-          mode_sel:   "{{ states('input_select.energy_os_mode') }}"
-          level:      "{{ states('sensor.eos_tariff_level') }}"
-          soc:        "{{ states('sensor.eos_battery_soc_estimate_pct') | float(50) }}"
-          soc_min:    "{{ states('input_number.eos_min_soc_for_eve_discharge') | float(30) }}"
-          grid:       "{{ states('sensor.eos_grid_power_w') | float(0) }}"
-          hard_lim:   "{{ states('input_number.eos_grid_hard_limit_w') | float(5500) }}"
-          bat_low:    "{{ is_state('binary_sensor.eos_asset_battery_low', 'on') }}"
-          hp_full:    20
-          hp_charge:  "{{ states('input_number.eos_hp_min_cap_during_charge') | int(6) }}"
-          hp_sell:    "{{ states('input_number.eos_hp_min_cap_during_sell') | int(8) }}"
-          hp_peak:    "{{ states('input_number.eos_hp_cap_during_peak') | int(10) }}"
+          mode_sel:       "{{ states('input_select.energy_os_mode') }}"
+          level:          "{{ states('sensor.eos_tariff_level') }}"
+          soc:            "{{ states('sensor.eos_battery_soc_estimate_pct') | float(50) }}"
+          soc_min:        "{{ states('input_number.eos_min_soc_for_eve_discharge') | float(30) }}"
+          grid:           "{{ states('sensor.eos_grid_power_w') | float(0) }}"
+          hard_lim:       "{{ states('input_number.eos_grid_hard_limit_w') | float(5500) }}"
+          bat_low:        "{{ is_state('binary_sensor.eos_asset_battery_low', 'on') }}"
+          hp_full:        20
+          hp_charge:      "{{ states('input_number.eos_hp_min_cap_during_charge') | int(6) }}"
+          hp_sell:        "{{ states('input_number.eos_hp_min_cap_during_sell') | int(8) }}"
+          hp_peak:        "{{ states('input_number.eos_hp_cap_during_peak') | int(10) }}"
+          # Comfort floor: HP nooit verder throttlen dan de buitentemp toelaat.
+          # Bij < -5°C = floor 16, bij < 0°C = 14, ..., boven 10°C = 6 (minimum).
+          hp_comfort_min: "{{ states('sensor.eos_asset_hp_min_comfort_cap') | int(6) }}"
+          # PV dekt HP: als zonnestroom de HP volledig voedt, heeft throttlen geen zin.
+          pv_covers_hp:   "{{ is_state('sensor.eos_asset_hp_pv_covered', 'True') }}"
 
       - choose:
           # ── HANDMATIG / TIMED ─────────────────────────────
@@ -250,46 +257,67 @@ automation:
                 data: {value: "SELF_CONSUMPTION"}
 
           # ── CHARGE ────────────────────────────────────────
-          # ESP laadt op max. HP getrotteld (batterij en HP concurreren op grid).
+          # ESP laadt op max. HP getrotteld, maar nooit onder comfort floor.
+          # Als PV de HP volledig dekt, HP vrij laten (throttlen heeft geen effect).
           - conditions: "{{ mode_sel == 'Charge' }}"
             sequence:
+              - variables:
+                  cap_charge: >
+                    {% if pv_covers_hp %}{{ hp_full }}
+                    {% else %}{{ [hp_charge, hp_comfort_min] | max }}{% endif %}
               - service: script.eos_apply_hp_cap
-                data: {cap_level: "{{ hp_charge }}"}
+                data: {cap_level: "{{ cap_charge }}"}
               - service: input_text.set_value
                 target: {entity_id: input_text.eos_current_reason}
-                data: {value: "Charge — max laden, HP throttle {{ hp_charge }}"}
+                data:
+                  value: >
+                    {% if pv_covers_hp %}Charge — PV dekt HP, throttle opheven
+                    {% elif cap_charge > hp_charge %}Charge — HP floor {{ cap_charge }} (buiten {{ states('sensor.eos_outside_temp_c') | round(0) }}°C)
+                    {% else %}Charge — max laden, HP throttle {{ cap_charge }}{% endif %}
               - service: input_text.set_value
                 target: {entity_id: input_text.eos_current_decision_code}
                 data: {value: "CHARGE"}
 
           # ── SELL ──────────────────────────────────────────
+          # Ontladen, maar comfort floor beschermt bij koud weer.
           - conditions: "{{ mode_sel == 'Sell' }}"
             sequence:
+              - variables:
+                  cap_sell: >
+                    {% if pv_covers_hp %}{{ hp_full }}
+                    {% else %}{{ [hp_sell, hp_comfort_min] | max }}{% endif %}
               - service: script.eos_apply_hp_cap
-                data: {cap_level: "{{ hp_sell }}"}
+                data: {cap_level: "{{ cap_sell }}"}
               - service: input_text.set_value
                 target: {entity_id: input_text.eos_current_reason}
-                data: {value: "Sell — ontladen, HP throttle {{ hp_sell }}"}
+                data:
+                  value: >
+                    {% if pv_covers_hp %}Sell — PV dekt HP, throttle opheven
+                    {% elif cap_sell > hp_sell %}Sell — HP floor {{ cap_sell }} (buiten {{ states('sensor.eos_outside_temp_c') | round(0) }}°C)
+                    {% else %}Sell — ontladen, HP throttle {{ cap_sell }}{% endif %}
               - service: input_text.set_value
                 target: {entity_id: input_text.eos_current_decision_code}
                 data: {value: "SELL"}
 
           # ── PEAK SHAVE ────────────────────────────────────
-          # Selecteerbare modus (automatische overlay zit in ESP)
+          # Selecteerbare modus (automatische overlay zit in ESP).
+          # Comfort floor beschermt ook hier.
           - conditions: "{{ mode_sel == 'Peak shave' }}"
             sequence:
+              - variables:
+                  cap_peak: "{{ [hp_peak, hp_comfort_min] | max }}"
               - service: script.eos_apply_hp_cap
-                data: {cap_level: "{{ hp_peak }}"}
+                data: {cap_level: "{{ cap_peak }}"}
               - service: input_text.set_value
                 target: {entity_id: input_text.eos_current_reason}
-                data: {value: "Peak shave — grid {{ grid | int }}W, HP {{ hp_peak }}"}
+                data: {value: "Peak shave — grid {{ grid | int }}W, HP cap {{ cap_peak }}"}
               - service: input_text.set_value
                 target: {entity_id: input_text.eos_current_decision_code}
                 data: {value: "PEAK_SHAVE"}
 
           # ── DYNAMIC / DYNAMIC 2 ───────────────────────────
           # ESP regelt batterij op basis van tarief.
-          # HP-coördinatie hier op basis van tarief_level.
+          # HP-coördinatie hier op basis van tarief_level + comfort floor + PV-coverage.
           - conditions: "{{ mode_sel in ['Dynamic', 'Dynamic 2'] }}"
             sequence:
               - if:
@@ -298,16 +326,21 @@ automation:
                     state: "on"
                 then:
                   - variables:
-                      desired_cap: >
+                      raw_cap: >
                         {% if grid > hard_lim %}{{ hp_peak }}
                         {% elif level == 'duur' and not bat_low %}{{ hp_sell }}
                         {% elif level == 'goedkoop' %}{{ hp_charge }}
                         {% else %}{{ hp_full }}{% endif %}
+                      desired_cap: >
+                        {% if pv_covers_hp %}{{ hp_full }}
+                        {% else %}{{ [raw_cap | int, hp_comfort_min] | max }}{% endif %}
                       reason_text: >
-                        {% if grid > hard_lim %}Grid {{ grid | int }}W boven limit → HP throttle
-                        {% elif level == 'duur' and not bat_low %}Tarief duur, ESP ontlaadt → HP throttle {{ hp_sell }}
-                        {% elif level == 'goedkoop' %}Tarief goedkoop, ESP laadt → HP throttle {{ hp_charge }}
-                        {% else %}Tarief normaal → HP vrij{% endif %}
+                        {% set floor_active = not pv_covers_hp and (raw_cap | int) < hp_comfort_min %}
+                        {% if pv_covers_hp %}PV dekt HP → vrij
+                        {% elif grid > hard_lim %}Grid {{ grid | int }}W boven limit → HP cap {{ desired_cap }}
+                        {% elif level == 'duur' and not bat_low %}Duur tarief, ESP ontlaadt → HP cap {{ desired_cap }}{% if floor_active %} (floor){% endif %}
+                        {% elif level == 'goedkoop' %}Goedkoop, ESP laadt → HP cap {{ desired_cap }}{% if floor_active %} (floor){% endif %}
+                        {% else %}Normaal tarief → HP vrij{% endif %}
                   - service: script.eos_apply_hp_cap
                     data: {cap_level: "{{ desired_cap }}"}
                   - service: input_text.set_value
