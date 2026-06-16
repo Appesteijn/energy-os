@@ -468,74 +468,431 @@ template:
           {% set rate = states('sensor.eos_grid_export_revenue_rate_eur_h') | float(0) %}
           {{ [last + rate / 12, last] | max | round(5) }}
 
-utility_meter:
-  eos_today_grid_import_meter:
-    source: sensor.eos_grid_import_cumulative_kwh
-    cycle: daily
-    name: "EOS Grid import vandaag"
+# ─── KPI meters: dagelijks + maandelijks reset ───────────────
+# utility_meter YAML is verwijderd in HA 2025+.
+# Vervanging: trigger-gebaseerde referentie-sensors + berekende dagelijkse/maandelijkse waarden.
+#
+# Aanpak:
+#   1. Referentie-sensors (trigger: midnight + HA start) slaan de cumulatieve waarde op
+#      bij het begin van de dag/maand.
+#   2. KPI-sensors = huidig_cumulatief − referentie  (altijd ≥ 0)
 
-  eos_today_grid_export_meter:
-    source: sensor.eos_grid_export_cumulative_kwh
-    cycle: daily
-    name: "EOS Grid export vandaag"
+  # ── Referentie-sensors: dagelijks (reset om 00:00) ──────────
+  - trigger:
+      - platform: time
+        at: "00:00:00"
+      - platform: homeassistant
+        event: start
+    sensor:
+      - name: "eos_ref_daily_grid_import"
+        unique_id: eos_ref_daily_grid_import
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: >
+          {% if trigger.platform == 'time' %}
+            {{ states('sensor.eos_grid_import_cumulative_kwh') | float(0) }}
+          {% elif this.state in ['unavailable', 'unknown'] %}
+            {{ states('sensor.eos_grid_import_cumulative_kwh') | float(0) }}
+          {% else %}
+            {{ this.state | float(0) }}
+          {% endif %}
 
-  eos_today_battery_charge_meter:
-    source: sensor.eos_battery_charge_cumulative_kwh
-    cycle: daily
-    name: "EOS Batterij geladen vandaag"
+      - name: "eos_ref_daily_grid_export"
+        unique_id: eos_ref_daily_grid_export
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: >
+          {% if trigger.platform == 'time' %}
+            {{ states('sensor.eos_grid_export_cumulative_kwh') | float(0) }}
+          {% elif this.state in ['unavailable', 'unknown'] %}
+            {{ states('sensor.eos_grid_export_cumulative_kwh') | float(0) }}
+          {% else %}
+            {{ this.state | float(0) }}
+          {% endif %}
 
-  eos_today_battery_discharge_meter:
-    source: sensor.eos_battery_discharge_cumulative_kwh
-    cycle: daily
-    name: "EOS Batterij ontladen vandaag"
+      - name: "eos_ref_daily_battery_charge"
+        unique_id: eos_ref_daily_battery_charge
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: >
+          {% if trigger.platform == 'time' %}
+            {{ states('sensor.eos_battery_charge_cumulative_kwh') | float(0) }}
+          {% elif this.state in ['unavailable', 'unknown'] %}
+            {{ states('sensor.eos_battery_charge_cumulative_kwh') | float(0) }}
+          {% else %}
+            {{ this.state | float(0) }}
+          {% endif %}
 
-  eos_today_solar_production_meter:
-    source: sensor.eos_solar_production_cumulative_kwh
-    cycle: daily
-    name: "EOS Zonproductie vandaag"
+      - name: "eos_ref_daily_battery_discharge"
+        unique_id: eos_ref_daily_battery_discharge
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: >
+          {% if trigger.platform == 'time' %}
+            {{ states('sensor.eos_battery_discharge_cumulative_kwh') | float(0) }}
+          {% elif this.state in ['unavailable', 'unknown'] %}
+            {{ states('sensor.eos_battery_discharge_cumulative_kwh') | float(0) }}
+          {% else %}
+            {{ this.state | float(0) }}
+          {% endif %}
 
-  eos_month_solar_production_meter:
-    source: sensor.eos_solar_production_cumulative_kwh
-    cycle: monthly
-    name: "EOS Zonproductie deze maand"
+      - name: "eos_ref_daily_solar"
+        unique_id: eos_ref_daily_solar
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: >
+          {% if trigger.platform == 'time' %}
+            {{ states('sensor.eos_solar_production_cumulative_kwh') | float(0) }}
+          {% elif this.state in ['unavailable', 'unknown'] %}
+            {{ states('sensor.eos_solar_production_cumulative_kwh') | float(0) }}
+          {% else %}
+            {{ this.state | float(0) }}
+          {% endif %}
 
-  eos_today_grid_import_cost_meter:
-    source: sensor.eos_grid_import_cost_cumulative_eur
-    cycle: daily
-    name: "EOS Importkosten vandaag"
+      - name: "eos_ref_daily_import_cost"
+        unique_id: eos_ref_daily_import_cost
+        unit_of_measurement: "€"
+        state_class: total_increasing
+        state: >
+          {% if trigger.platform == 'time' %}
+            {{ states('sensor.eos_grid_import_cost_cumulative_eur') | float(0) }}
+          {% elif this.state in ['unavailable', 'unknown'] %}
+            {{ states('sensor.eos_grid_import_cost_cumulative_eur') | float(0) }}
+          {% else %}
+            {{ this.state | float(0) }}
+          {% endif %}
 
-  eos_today_grid_export_revenue_meter:
-    source: sensor.eos_grid_export_revenue_cumulative_eur
-    cycle: daily
-    name: "EOS Exportopbrengst vandaag"
+      - name: "eos_ref_daily_export_revenue"
+        unique_id: eos_ref_daily_export_revenue
+        unit_of_measurement: "€"
+        state_class: total_increasing
+        state: >
+          {% if trigger.platform == 'time' %}
+            {{ states('sensor.eos_grid_export_revenue_cumulative_eur') | float(0) }}
+          {% elif this.state in ['unavailable', 'unknown'] %}
+            {{ states('sensor.eos_grid_export_revenue_cumulative_eur') | float(0) }}
+          {% else %}
+            {{ this.state | float(0) }}
+          {% endif %}
 
-  # ─── Maandelijkse meters ──────────────────────────────────
-  eos_month_grid_import_kwh_meter:
-    source: sensor.eos_grid_import_cumulative_kwh
-    cycle: monthly
-    name: "EOS Grid import deze maand"
 
-  eos_month_grid_export_kwh_meter:
-    source: sensor.eos_grid_export_cumulative_kwh
-    cycle: monthly
-    name: "EOS Grid export deze maand"
+  # ── KPI-sensors: vandaag ─────────────────────────────────────
+  - sensor:
+      - name: "eos_today_grid_import_meter"
+        unique_id: eos_today_grid_import_meter
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:transmission-tower-import
+        state: >
+          {{ [states('sensor.eos_grid_import_cumulative_kwh') | float(0) -
+              states('sensor.eos_ref_daily_grid_import') | float(0), 0] | max | round(3) }}
 
-  eos_month_battery_charge_kwh_meter:
-    source: sensor.eos_battery_charge_cumulative_kwh
-    cycle: monthly
-    name: "EOS Batterij geladen deze maand"
+      - name: "eos_today_grid_export_meter"
+        unique_id: eos_today_grid_export_meter
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:transmission-tower-export
+        state: >
+          {{ [states('sensor.eos_grid_export_cumulative_kwh') | float(0) -
+              states('sensor.eos_ref_daily_grid_export') | float(0), 0] | max | round(3) }}
 
-  eos_month_battery_discharge_kwh_meter:
-    source: sensor.eos_battery_discharge_cumulative_kwh
-    cycle: monthly
-    name: "EOS Batterij ontladen deze maand"
+      - name: "eos_today_battery_charge_meter"
+        unique_id: eos_today_battery_charge_meter
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:battery-arrow-down-outline
+        state: >
+          {{ [states('sensor.eos_battery_charge_cumulative_kwh') | float(0) -
+              states('sensor.eos_ref_daily_battery_charge') | float(0), 0] | max | round(3) }}
 
-  eos_month_grid_import_cost_meter:
-    source: sensor.eos_grid_import_cost_cumulative_eur
-    cycle: monthly
-    name: "EOS Importkosten deze maand"
+      - name: "eos_today_battery_discharge_meter"
+        unique_id: eos_today_battery_discharge_meter
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:battery-arrow-up-outline
+        state: >
+          {{ [states('sensor.eos_battery_discharge_cumulative_kwh') | float(0) -
+              states('sensor.eos_ref_daily_battery_discharge') | float(0), 0] | max | round(3) }}
 
-  eos_month_grid_export_revenue_meter:
-    source: sensor.eos_grid_export_revenue_cumulative_eur
-    cycle: monthly
-    name: "EOS Exportopbrengst deze maand"
+      - name: "eos_today_solar_production_meter"
+        unique_id: eos_today_solar_production_meter
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:solar-power
+        state: >
+          {{ [states('sensor.eos_solar_production_cumulative_kwh') | float(0) -
+              states('sensor.eos_ref_daily_solar') | float(0), 0] | max | round(3) }}
+
+      - name: "eos_today_grid_import_cost_meter"
+        unique_id: eos_today_grid_import_cost_meter
+        unit_of_measurement: "€"
+        state_class: total_increasing
+        icon: mdi:cash-minus
+        state: >
+          {{ [states('sensor.eos_grid_import_cost_cumulative_eur') | float(0) -
+              states('sensor.eos_ref_daily_import_cost') | float(0), 0] | max | round(4) }}
+
+      - name: "eos_today_grid_export_revenue_meter"
+        unique_id: eos_today_grid_export_revenue_meter
+        unit_of_measurement: "€"
+        state_class: total_increasing
+        icon: mdi:cash-plus
+        state: >
+          {{ [states('sensor.eos_grid_export_revenue_cumulative_eur') | float(0) -
+              states('sensor.eos_ref_daily_export_revenue') | float(0), 0] | max | round(4) }}
+
+  # ── KPI-sensors: deze maand ───────────────────────────────────
+  - sensor:
+      - name: "eos_month_solar_production_meter"
+        unique_id: eos_month_solar_production_meter
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:solar-power
+        state: >
+          {{ [states('sensor.eos_solar_production_cumulative_kwh') | float(0) -
+              states('input_number.eos_ref_monthly_solar') | float(0), 0] | max | round(3) }}
+
+      - name: "eos_month_grid_import_kwh_meter"
+        unique_id: eos_month_grid_import_kwh_meter
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:transmission-tower-import
+        state: >
+          {{ [states('sensor.eos_grid_import_cumulative_kwh') | float(0) -
+              states('input_number.eos_ref_monthly_grid_import') | float(0), 0] | max | round(3) }}
+
+      - name: "eos_month_grid_export_kwh_meter"
+        unique_id: eos_month_grid_export_kwh_meter
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:transmission-tower-export
+        state: >
+          {{ [states('sensor.eos_grid_export_cumulative_kwh') | float(0) -
+              states('input_number.eos_ref_monthly_grid_export') | float(0), 0] | max | round(3) }}
+
+      - name: "eos_month_battery_charge_kwh_meter"
+        unique_id: eos_month_battery_charge_kwh_meter
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:battery-arrow-down-outline
+        state: >
+          {{ [states('sensor.eos_battery_charge_cumulative_kwh') | float(0) -
+              states('input_number.eos_ref_monthly_battery_charge') | float(0), 0] | max | round(3) }}
+
+      - name: "eos_month_battery_discharge_kwh_meter"
+        unique_id: eos_month_battery_discharge_kwh_meter
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:battery-arrow-up-outline
+        state: >
+          {{ [states('sensor.eos_battery_discharge_cumulative_kwh') | float(0) -
+              states('input_number.eos_ref_monthly_battery_discharge') | float(0), 0] | max | round(3) }}
+
+      - name: "eos_month_grid_import_cost_meter"
+        unique_id: eos_month_grid_import_cost_meter
+        unit_of_measurement: "€"
+        state_class: total_increasing
+        icon: mdi:cash-minus
+        state: >
+          {{ [states('sensor.eos_grid_import_cost_cumulative_eur') | float(0) -
+              states('input_number.eos_ref_monthly_import_cost') | float(0), 0] | max | round(4) }}
+
+      - name: "eos_month_grid_export_revenue_meter"
+        unique_id: eos_month_grid_export_revenue_meter
+        unit_of_measurement: "€"
+        state_class: total_increasing
+        icon: mdi:cash-plus
+        state: >
+          {{ [states('sensor.eos_grid_export_revenue_cumulative_eur') | float(0) -
+              states('input_number.eos_ref_monthly_export_revenue') | float(0), 0] | max | round(4) }}
+
+# ─── Maandelijkse referentie helpers ────────────────────────────
+# input_number (persistent via HA restore-state, geen initial: zodat herstart waarde bewaart).
+# Reset via automation op dag 1 om 00:00.
+# Eerste keer instellen: run script eos_init_monthly_refs_june2026 eenmalig via Ontwikkelaarstools.
+
+input_number:
+  eos_ref_monthly_grid_import:
+    min: 0
+    max: 9999999
+    step: 0.001
+    unit_of_measurement: kWh
+    icon: mdi:transmission-tower-import
+    mode: box
+  eos_ref_monthly_grid_export:
+    min: 0
+    max: 9999999
+    step: 0.001
+    unit_of_measurement: kWh
+    icon: mdi:transmission-tower-export
+    mode: box
+  eos_ref_monthly_solar:
+    min: 0
+    max: 9999999
+    step: 0.001
+    unit_of_measurement: kWh
+    icon: mdi:solar-power
+    mode: box
+  eos_ref_monthly_battery_charge:
+    min: 0
+    max: 9999999
+    step: 0.001
+    unit_of_measurement: kWh
+    icon: mdi:battery-arrow-down-outline
+    mode: box
+  eos_ref_monthly_battery_discharge:
+    min: 0
+    max: 9999999
+    step: 0.001
+    unit_of_measurement: kWh
+    icon: mdi:battery-arrow-up-outline
+    mode: box
+  eos_ref_monthly_import_cost:
+    min: 0
+    max: 9999999
+    step: 0.0001
+    unit_of_measurement: "€"
+    icon: mdi:cash-minus
+    mode: box
+  eos_ref_monthly_export_revenue:
+    min: 0
+    max: 9999999
+    step: 0.0001
+    unit_of_measurement: "€"
+    icon: mdi:cash-plus
+    mode: box
+
+# ─── Maandelijkse reset automatisering ──────────────────────────
+automation:
+  - id: eos_dhw_solar_boost_auto
+    alias: "EOS DHW Solar Boost Automatisch"
+    description: "Batterij heeft voorrang; DHW boost aan zodra SoC≥99% én zon actief"
+    trigger:
+      - platform: state
+        entity_id: sensor.eos_battery_soc_estimate_pct
+      - platform: state
+        entity_id: binary_sensor.eos_solar_active
+    action:
+      - choose:
+          - conditions:
+              - condition: numeric_state
+                entity_id: sensor.eos_battery_soc_estimate_pct
+                above: 98.9
+              - condition: state
+                entity_id: binary_sensor.eos_solar_active
+                state: "on"
+            sequence:
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.eos_dhw_solar_boost_active
+        default:
+          - service: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.eos_dhw_solar_boost_active
+
+  - id: eos_reset_monthly_refs
+    alias: "EOS Reset Maandelijkse Referenties"
+    description: "Slaat cumulatieve waarden op als maandbegin-referentie op dag 1 om 00:00"
+    trigger:
+      - platform: time
+        at: "00:00:00"
+    condition:
+      - condition: template
+        value_template: "{{ now().day == 1 }}"
+    action:
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_grid_import
+        data:
+          value: "{{ states('sensor.eos_grid_import_cumulative_kwh') | float(0) }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_grid_export
+        data:
+          value: "{{ states('sensor.eos_grid_export_cumulative_kwh') | float(0) }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_solar
+        data:
+          value: "{{ states('sensor.eos_solar_production_cumulative_kwh') | float(0) }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_battery_charge
+        data:
+          value: "{{ states('sensor.eos_battery_charge_cumulative_kwh') | float(0) }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_battery_discharge
+        data:
+          value: "{{ states('sensor.eos_battery_discharge_cumulative_kwh') | float(0) }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_import_cost
+        data:
+          value: "{{ states('sensor.eos_grid_import_cost_cumulative_eur') | float(0) }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_export_revenue
+        data:
+          value: "{{ states('sensor.eos_grid_export_revenue_cumulative_eur') | float(0) }}"
+
+# ─── Eenmalig init-script juni 2026 ─────────────────────────────
+# Berekend uit P1-statistieken in HA DB: T1/T2 delta's op 2026-05-31 22:00 UTC
+# (= 1 juni 00:00 CEST) teruggerekend naar absolute P1 hardware-teller waarden.
+# Uitvoeren via Ontwikkelaarstools → Services → script.turn_on (eos_init_monthly_refs_june2026)
+# of via Ontwikkelaarstools → Template met aanroep service.
+
+script:
+  eos_init_monthly_refs_june2026:
+    alias: "EOS Init Maandelijkse Refs Juni 2026 (eenmalig)"
+    sequence:
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_grid_import
+        data:
+          value: 57493.773
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_grid_export
+        data:
+          value: 839.215
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_solar
+        data:
+          value: 0.0751
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_battery_charge
+        data:
+          value: 0.0507
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_battery_discharge
+        data:
+          value: 0.0
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_import_cost
+        data:
+          value: 0.00219
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.eos_ref_monthly_export_revenue
+        data:
+          value: 0.0

@@ -227,8 +227,18 @@ views:
             name: "Naar vol"
           - entity: sensor.eos_asset_battery_energy_to_min_kwh
             name: "Beschikbaar"
+          - type: divider
           - entity: sensor.eos_asset_hp_running
             name: "WP draait"
+          - entity: sensor.eos_asset_hp_min_comfort_cap
+            name: "WP comfort floor (nu)"
+            icon: mdi:thermometer-check
+          - entity: sensor.eos_asset_hp_pv_covered
+            name: "WP gedekt door PV"
+            icon: mdi:solar-power-variant-outline
+          - entity: sensor.eos_asset_hp_can_defer_min
+            name: "WP uitstelruimte (min)"
+          - type: divider
           - entity: sensor.eos_asset_dhw_temp_c
             name: "DHW temp"
           - entity: sensor.eos_asset_dhw_needs_heating
@@ -547,18 +557,39 @@ views:
         entities:
           - entity: sensor.eos_dhw_top_c
             name: "Tank top temperatuur"
+          - entity: sensor.eos_asset_dhw_needs_heating
+            name: "DHW vraag"
+          - entity: sensor.eos_asset_dhw_can_defer_hr
+            name: "Uitstelruimte (uur)"
           - entity: sensor.eos_dhw_preheat_opportunity
             name: "Pre-heat kans"
+          - type: divider
           - entity: input_boolean.eos_dhw_solar_boost_enabled
-            name: "Solar boost: toestaan (slider)"
+            name: "Solar boost: toestaan"
           - entity: input_boolean.eos_dhw_solar_boost_active
             name: "Solar boost actief nu"
           - entity: binary_sensor.openquatt_ext_dhw_solar_boost
-            name: "Solar boost signaal → OpenQuatt"
+            name: "Solar boost → OpenQuatt"
+          - entity: binary_sensor.openquatt_ext_dhw_legionella_cheap_window
+            name: "Legionella goedkoop venster → OQ"
+            icon: mdi:water-thermometer-outline
           - entity: input_number.eos_dhw_preheat_max_temp_c
             name: "Max temp voor boost"
           - entity: input_number.eos_dhw_solar_surplus_threshold_w
             name: "Min solar surplus voor boost"
+          - type: divider
+          - entity: input_datetime.house_battery_strategy_dynamic_cheapest_start
+            name: "Goedkoop venster start → OQ"
+            icon: mdi:clock-start
+          - entity: input_datetime.house_battery_strategy_dynamic_cheapest_end
+            name: "Goedkoop venster einde → OQ"
+            icon: mdi:clock-end
+          - entity: input_datetime.house_battery_strategy_dynamic_expensive_start
+            name: "Duur venster start → OQ"
+            icon: mdi:clock-alert
+          - entity: input_datetime.house_battery_strategy_dynamic_expensive_end
+            name: "Duur venster einde → OQ"
+            icon: mdi:clock-alert-outline
 
       # ── Anomalieën ──────────────────────────────────────
       - type: entities
@@ -701,11 +732,40 @@ views:
         title: "Warmtepomp coördinatie"
         entities:
           - entity: input_number.eos_hp_cap_override
-            name: "HP cap (live)"
+            name: "HP cap EOS (live)"
           - entity: input_number.eos_hp_min_cap_during_sell
             name: "HP cap bij Sell"
           - entity: input_number.eos_hp_min_cap_during_charge
             name: "HP cap bij Charge"
+          - entity: input_number.eos_hp_cap_during_peak
+            name: "HP cap bij peak shave"
+          - type: divider
+          - entity: sensor.eos_asset_hp_min_comfort_cap
+            name: "Comfort floor (buitentemp)"
+            icon: mdi:thermometer-check
+          - entity: sensor.eos_asset_hp_pv_covered
+            name: "PV dekt HP"
+            icon: mdi:solar-power-variant-outline
+          - entity: sensor.eos_outside_temp_c
+            name: "Buitentemperatuur"
+            icon: mdi:thermometer
+          - type: divider
+          - entity: input_text.eos_current_reason
+            name: "Huidige reden dispatcher"
+          - type: divider
+          - entity: sensor.openquatt_ext_electricity_tariff_now
+            name: "Tarief → OQ"
+            icon: mdi:currency-eur
+          - entity: sensor.openquatt_ext_electricity_tariff_avg24
+            name: "Tarief 24h gem → OQ"
+            icon: mdi:chart-line
+          - entity: sensor.openquatt_ext_grid_net_power
+            name: "Grid netto → OQ (W)"
+            icon: mdi:transmission-tower
+          # Na flashen van oq_energy_os_bridge: verwijder commentaar:
+          # - entity: number.openquatt_eos_hp_cap_ha
+          #   name: "HP cap → OQ firmware"
+          #   icon: mdi:heat-pump-outline
 
       # ── M15: Optimaal laden ─────────────────────────────
       - type: entities

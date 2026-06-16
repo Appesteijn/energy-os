@@ -339,6 +339,19 @@ input_number:
     initial: 6
     mode: slider
 
+  eos_comfort_coast_margin_min:
+    name: "Comfort coast-marge (min)"
+    min: 0
+    max: 240
+    step: 5
+    initial: 45
+    unit_of_measurement: "min"
+    mode: box
+    icon: mdi:home-clock-outline
+    # Comfort-guard (vereist quatt_stooklijn): bij duur tarief de WP alleen
+    # knijpen zolang de veilige uitlooptijd (sensor.quatt_warmteanalyse_veilige_uitlooptijd)
+    # groter is dan deze marge. Zo komt het huis nooit te dicht bij de comfort-vloer.
+
   eos_charge_target_soc:
     name: "Charge: stop bij SoC (%)"
     min: 10

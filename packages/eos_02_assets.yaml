@@ -5,6 +5,15 @@
 # Lagen 3+ vragen alleen capabilities op, ze kennen geen
 # device-specifieke knoppen. Dit maakt asset-swap mogelijk
 # (Marstek → Tesla Powerwall) zonder elders te wijzigen.
+#
+# OPTIONELE INTEGRATIE — quatt_stooklijn (HA custom component)
+#   Als geïnstalleerd verrijkt het twee HP-capabilities met gemeten data:
+#     - eos_asset_hp_cop_estimate ← sensor.quatt_warmteanalyse_geschatte_actuele_cop
+#         (echte COP-perfmap i.p.v. Carnot-heuristiek)
+#     - eos_asset_hp_can_defer_min ← sensor.quatt_warmteanalyse_veilige_uitlooptijd
+#         (fysieke coast-tijd uit RC-model + zon-forecast i.p.v. buitentemp-buckets)
+#   Niet geïnstalleerd? Beide sensoren zijn 'unknown' → de templates vallen
+#   automatisch terug op de oorspronkelijke heuristiek. Geen harde dependency.
 # ============================================================
 
 template:
@@ -87,26 +96,65 @@ template:
         state_class: measurement
         state: >
           {# Hoeveel minuten kan HP uitgesteld worden zonder comfort te verliezen?
-             Schatting o.b.v. buitentemp: koud = kort uitstellen, mild = lang #}
+             Voorkeur: fysieke coast-tijd van quatt_stooklijn (RC-model + zon-forecast,
+             tot de comfort-vloer). Fallback (geen stooklijn): schatting o.b.v.
+             buitentemp — koud = kort uitstellen, mild = lang. #}
+          {% set coast = states('sensor.quatt_warmteanalyse_veilige_uitlooptijd') | float(-1) %}
+          {% if coast >= 0 %}{{ coast | int }}
+          {% else %}
           {% set tout = states('sensor.eos_outside_temp_c') | float(15) %}
           {% if tout < -5 %}10
           {% elif tout < 0 %}20
           {% elif tout < 5 %}40
           {% elif tout < 10 %}90
           {% else %}240{% endif %}
+          {% endif %}
         icon: mdi:timer-pause-outline
 
       - name: "eos_asset_hp_cop_estimate"
         unique_id: eos_asset_hp_cop_estimate
         state_class: measurement
         state: >
+          {# Voorkeur: gemeten COP-perfmap van quatt_stooklijn (COP bij huidige
+             buitentemp). Fallback (geen stooklijn): Carnot-derived heuristiek. #}
+          {% set cop_real = states('sensor.quatt_warmteanalyse_geschatte_actuele_cop') | float(-1) %}
+          {% if cop_real > 0 %}{{ cop_real | round(2) }}
+          {% else %}
           {% set t_out = states('sensor.eos_outside_temp_c') | float(7) %}
           {% set t_sup = states('sensor.eos_hp_supply_temp_c') | float(35) %}
-          {# Simpele Carnot-derived heuristiek; vervang door perf-map indien beschikbaar #}
           {% set dt = (t_sup + 273.15) - (t_out + 273.15) %}
           {% if dt > 5 %}{{ (0.45 * (t_sup + 273.15) / dt) | round(2) }}
           {% else %}5.0{% endif %}
+          {% endif %}
         icon: mdi:chart-line
+
+      # ─── Comfort minimum HP cap (buitentemp-afhankelijk) ────
+      # Nooit onder dit niveau throttlen: bij koud weer heeft de HP
+      # meer capaciteit nodig om het huis op temp te houden.
+      # Schaal: 0=volledig stop, 20=geen beperking.
+      - name: "eos_asset_hp_min_comfort_cap"
+        unique_id: eos_asset_hp_min_comfort_cap
+        state_class: measurement
+        icon: mdi:thermometer-check
+        state: >
+          {% set tout = states('sensor.eos_outside_temp_c') | float(15) %}
+          {% if tout < -5 %}16
+          {% elif tout < 0 %}14
+          {% elif tout < 5 %}12
+          {% elif tout < 10 %}10
+          {% else %}6{% endif %}
+
+      # ─── PV dekt HP volledig ────────────────────────────────
+      # True als PV-productie de HP-consumptie plus een buffer van 400W dekt.
+      # In dat geval heeft HP throttlen geen zin: de HP trekt toch al
+      # van zonne-energie, niet van het net of de batterij.
+      - name: "eos_asset_hp_pv_covered"
+        unique_id: eos_asset_hp_pv_covered
+        icon: mdi:solar-power-variant-outline
+        state: >
+          {% set pv = states('sensor.eos_solar_power_w') | float(0) %}
+          {% set hp = states('sensor.eos_hp_power_w') | float(0) %}
+          {{ pv > 200 and (pv - hp) > 400 }}
 
       # ─── DHW capabilities ─────────────────────────────────
       - name: "eos_asset_dhw_temp_c"
